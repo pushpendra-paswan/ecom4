@@ -1,0 +1,19 @@
+# Secrets
+.env
+keys/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Local data / volumes (Docker named volumes live outside the repo, this is for any bind-mounted data)
+data/
+volumes/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
