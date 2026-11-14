@@ -12,12 +12,13 @@ An AI Customer Support Automation Platform for a simulated e-commerce company, b
 - WebSockets: `/ws/<path>` → realtime service as `/<path>`, with upgrade headers.
 - Planned (not built yet): gRPC for synchronous service-to-service calls (M5), RabbitMQ topic exchange `support.events` for events (M6), Celery for background jobs, Redis for Celery results, per-ticket locks and WebSocket fan-out.
 - Auth: Identity signs RS256 JWTs with a private key; every other service verifies them locally with the public key (no call to Identity).
-- Current state (M1): only Identity has a database and real endpoints. The other five services only expose `GET /health`. Nothing uses Redis or RabbitMQ yet; the containers just wait for them to be healthy.
+- Current state (M2): Identity and Order have databases and real endpoints (REST only). The other four services only expose `GET /health`. Nothing uses Redis or RabbitMQ yet; the containers just wait for them to be healthy.
 
 ## 3. Tech stack
 
 Python 3.12, FastAPI 0.162.7, Uvicorn 0.54.0, pydantic-settings 2.16.3. Postgres 17 + pgvector 0.8.2 (`pgvector/pgvector:0.8.2-pg17`), Redis 7.4 (`redis:7.4-alpine`), RabbitMQ 4.2 (`rabbitmq:4.2-management-alpine`), Nginx 1.28 (`nginx:1.28-alpine`). Docker Compose. Plain HTML/CSS/JS frontends.
 Identity (M1) also uses SQLAlchemy 2.1.8 (sync), psycopg 3.3.9 (binary), Alembic 1.20.1, PyJWT 2.15.1, cryptography 50.0.2, argon2-cffi 25.1.0, email-validator 2.3.0.
+Order (M2) uses the same pinned SQLAlchemy, psycopg, Alembic, PyJWT and cryptography versions as Identity.
 Later milestones add: Celery, pika/aio-pika, grpcio, LangChain/LangGraph (see `CLAUDE.md` section 7).
 
 ## 4. Services
@@ -55,6 +56,15 @@ Published to the host: Nginx `8080`, RabbitMQ management UI `15672`. Service por
         ├── main.py            # FastAPI app + GET /health
         └── config.py          # pydantic-settings
 
+services/order/ (M2) additionally has:
+    ├── alembic.ini, alembic/  # same pattern as identity; versions/0001_create_order_tables.py
+    ├── seed.py                # ten demo orders (run inside the container)
+    └── app/
+        ├── database.py, models.py, schemas.py, errors.py, auth.py   # database/errors/auth copied from identity
+        ├── routers/       order_router.py, return_router.py, refund_router.py
+        ├── services/      order_service.py, return_service.py, refund_service.py
+        └── repositories/  order_repository.py, return_repository.py, refund_repository.py
+
 services/identity/ (M1) additionally has:
     ├── alembic.ini, alembic/  # env.py reads DATABASE_URL from app.config; versions/0001_create_users.py
     ├── seed.py                # demo users (run inside the container)
@@ -67,10 +77,17 @@ services/identity/ (M1) additionally has:
 
 ## 6. Data model
 
-Databases created by `scripts/init_databases.sql`: `identity_db`, `ticket_db`, `order_db`, `knowledge_db` (with `vector` extension), `agent_db`. Only `identity_db` has tables so far.
+Databases created by `scripts/init_databases.sql`: `identity_db`, `ticket_db`, `order_db`, `knowledge_db` (with `vector` extension), `agent_db`. `identity_db` and `order_db` have tables so far.
 
 **identity_db**
 - `users`: `id` (UUID PK), `email` (varchar 255, unique index `ix_users_email`), `full_name` (200), `password_hash` (argon2), `role` (`customer` | `agent` | `admin`, check constraint), `created_at` (timestamptz, default `now()`).
+
+**order_db** (UUID primary keys, money `Numeric(10,2)`, statuses and categories are plain varchar; `customer_id` has no foreign key because customers live in identity_db)
+- `orders`: `id`, `order_number` (unique, `ORD-1001`), `customer_id` (indexed), `status` (`placed` | `shipped` | `delivered` | `cancelled`), `total_amount`, `ordered_at` (timestamptz).
+- `order_items`: `id`, `order_id` (FK, on delete cascade, indexed), `product_name`, `category`, `quantity`, `unit_price`.
+- `shipments`: `id`, `order_id` (FK, unique: one per order), `carrier`, `tracking_number`, `status` (`in_transit` | `delivered`), `shipped_on`, `estimated_delivery`, `delivered_on` (nullable). All dates are `date`.
+- `return_requests`: `id`, `order_id` (FK), `order_item_id` (FK, **unique**: an item is returned once), `customer_id` (indexed), `reason`, `refund_amount`, `status` (`requested` | `refunded`), `created_at`.
+- `refunds`: `id`, `return_request_id` (FK, **unique**), `approval_id` (**unique**), `amount`, `status` (`completed`), `created_at`.
 
 ## 7. Contracts
 
@@ -104,17 +121,32 @@ Error mapping (identity `main.py`): `NotFoundError` 404, `UnauthorizedError` 401
 | customer2@example.com | customer | `00000000-0000-0000-0000-000000000102` |
 | customer3@example.com | customer | `00000000-0000-0000-0000-000000000103` |
 
+**REST, order** (through Nginx: `/api/orders/...`). Missing, invalid or expired token → 401; wrong role → 403. A customer asking for someone else's order or return gets **404** (not 403). Amounts are JSON numbers (e.g. `4500.0`).
+| Endpoint | Roles | Result |
+|---|---|---|
+| `GET /orders` | customer | 200 own orders (with items and shipment), ordered by order number |
+| `GET /orders/{order_number}` | customer (own only), agent, admin (any) | 200 order with `items[]` and `shipment` (null for placed/cancelled); 404 |
+| `GET /orders/{order_number}/items/{item_id}/return-eligibility` | customer (own only), agent, admin (any) | 200 eligibility result (below); 404 if order or item not found |
+| `POST /returns` `{order_number, order_item_id, reason}` | customer | 201 return request (`status: requested`); 409 item already has a return; 400 not eligible (reason in `detail`); 404 not your order/item |
+| `GET /returns` | customer | 200 own return requests, newest first |
+| `GET /returns/{return_id}` | customer (own only), agent, admin (any) | 200 return request; 404 |
+| `POST /refunds/execute` `{return_request_id, approval_id}` | admin | 201 new refund; **200** same `approval_id` again (`already_processed: true`, nothing created); 409 different approval for an already-refunded return, or an approval already used for another return; 404 unknown return |
+
+**Return eligibility result** (the gRPC contract in M5 copies this exact shape): `eligible` (bool), `reason_code` (`eligible` | `not_delivered` | `non_returnable` | `window_expired` | `already_requested`), `reason` (sentence), `refund_amount` (quantity × unit price, only when eligible, else null), `window_days` and `days_remaining` (set once the order is delivered and the category is returnable, else null; `days_remaining` is 0 when expired). Rules, checked in this order (constants at the top of `return_service.py`): item belongs to the order (else 404) → order is `delivered` (with a shipment delivery date) → category is not `gift_card`/`perishable` → `days_since_delivery <= window` (30 days, **15 for `electronics`**) → no existing return request for the item. Decided per whole order line, no partial quantities. `create_return_request` runs the same check again and never trusts an earlier one.
+
+**Refund execution** (`refund_service.execute_refund`, simulated, logs one INFO line per refund): amount always comes from the return request. Idempotent through the unique constraints on `refunds.approval_id` and `refunds.return_request_id`: a repeated `approval_id` returns the existing refund; if two calls race, the loser's insert fails, it rolls back and returns the winner's refund (same approval) or a 409 (different approval). Verified with 8 parallel calls: exactly one 201. In M9 a Celery task will call this same function.
+
 **gRPC:** none yet. **Events:** none yet. **Celery tasks:** none yet.
 
 **Environment variables per service** (set in `docker-compose.yml`, values from `.env`):
-`SERVICE_NAME`, `PORT`, `ROOT_PATH` (the Nginx prefix), `DATABASE_URL` (not for realtime), `REDIS_URL`, `RABBITMQ_URL`. Identity also gets `JWT_PRIVATE_KEY_PATH`, `JWT_PUBLIC_KEY_PATH`, `ACCESS_TOKEN_EXPIRE_MINUTES`.
+`SERVICE_NAME`, `PORT`, `ROOT_PATH` (the Nginx prefix), `DATABASE_URL` (not for realtime), `REDIS_URL`, `RABBITMQ_URL`. Identity also gets `JWT_PRIVATE_KEY_PATH`, `JWT_PUBLIC_KEY_PATH`, `ACCESS_TOKEN_EXPIRE_MINUTES`. Order also gets `JWT_PUBLIC_KEY_PATH` (and mounts only `keys/public`).
 `.env` also holds the three JWT settings above (paths are container paths), `POSTGRES_USER`, `POSTGRES_PASSWORD`, `<SERVICE>_DATABASE_URL` ×5, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`, `OPENAI_API_KEY`, `CHAT_MODEL`, `EMBEDDING_MODEL`, `REFUND_AUTO_APPROVE_LIMIT` (the last four are not passed to any service yet).
 
 ## 8. Milestone status
 
 - [x] M0 Skeleton and infrastructure
 - [x] M1 Identity
-- [ ] M2 Order
+- [x] M2 Order
 - [ ] M3 Ticket
 - [ ] M4 Knowledge
 - [ ] M5 gRPC layer
@@ -126,6 +158,21 @@ Error mapping (identity `main.py`): `NotFoundError` 404, `UnauthorizedError` 401
 - [ ] M11 Customer app
 - [ ] M12 Agent dashboard
 - [ ] M13 Hardening and demo
+
+**Demo orders** (`docker compose exec order python seed.py`, safe to run again; dates are relative to the day the seed runs; every item has quantity 1; amounts in INR; later milestones depend on these numbers):
+| Order | Customer | Status | Items (category, price) | Scenario |
+|---|---|---|---|---|
+| ORD-1001 | customer1 | delivered 5 days ago | Wireless headphones (electronics, 4500), Phone case (accessories, 800) | eligible; headphones refund 4500 is under the 5000 auto-approve limit |
+| ORD-1002 | customer1 | delivered 40 days ago | T-shirt (clothing, 1200) | `window_expired` |
+| ORD-1003 | customer1 | shipped, in transit (Delhivery `DL-1003`) | Backpack (accessories, 2200) | `not_delivered`, live tracking |
+| ORD-1004 | customer2 | delivered 10 days ago | Smartwatch (electronics, 18000) | eligible; large refund that needs human approval |
+| ORD-1005 | customer2 | delivered 3 days ago | Gift card (gift_card, 2000) | `non_returnable` |
+| ORD-1006 | customer2 | delivered 20 days ago | Bluetooth speaker (electronics, 3500) | `window_expired` (15-day electronics window) |
+| ORD-1007 | customer2 | delivered 7 days ago | Jacket (clothing, 2500) | `already_requested` (seeded return request, status `requested`) |
+| ORD-1008 | customer3 | delivered 12 days ago | Running shoes (clothing, 3000), Socks (clothing, 400) | eligible; small refund |
+| ORD-1009 | customer3 | placed, not shipped | Desk lamp (electronics, 1500) | `not_delivered`, no shipment |
+| ORD-1010 | customer3 | cancelled | Notebook set (accessories, 600) | cancelled order, no shipment |
+Delivered orders have a `BlueDart` shipment (`BD-<number>`, shipped 3 days before delivery, ordered 5 days before delivery). Customer ids are the fixed ids from the Identity seed.
 
 ## 9. Design decisions
 
@@ -149,6 +196,14 @@ Error mapping (identity `main.py`): `NotFoundError` 404, `UnauthorizedError` 401
 - The user repository's `create` commits and takes an optional `user_id`, used only by the seed script for the fixed demo ids.
 - `generate_keys.py` refuses to overwrite existing keys (replacing them would invalidate every token) and sets the private key to mode 600.
 - `jwt.decode` requires `sub`, `email`, `role` and `exp`, and only accepts `RS256`; tokens signed with another key or `alg: none` return 401.
+- Order repositories only `flush`; order services own the `commit`. This lets `execute_refund` write the refund and the `refunded` status in one transaction (Identity's repository commits itself; there nothing needed two writes).
+- Order and return lookups for customers filter by `customer_id` in the query itself, so another customer's data is a plain 404 and existence is never revealed. Staff pass no filter.
+- A role branch (`customer` → own id, otherwise no filter) is written inline in the three routes that allow staff, instead of a helper.
+- `GET /orders` and `/returns` list endpoints are customer-only (agents/admins get 403); staff open single records by order number or return id.
+- Same `approval_id` sent for a different return request returns 409 (it would otherwise hit the unique constraint); not specified in the milestone prompt.
+- Money is `Decimal` in the database and services; `schemas.py` has one small `Money` type that serializes it as a JSON number with two decimals (Pydantic would otherwise send a string).
+- Order items are returned sorted by product name; all order-list queries load items and shipment with `selectinload`.
+- The order seed uses the models directly (one commit per order), not repositories, because it builds whole orders with items and shipment in one go.
 - `UnauthorizedError` was added as a fifth error class (also now listed in `CLAUDE.md` section 5).
 
 ## 10. How to run
@@ -162,14 +217,20 @@ docker compose down -v        # stop and wipe databases (re-runs the init script
 python scripts/generate_keys.py                  # once, BEFORE the first `docker compose up` (needs `pip install cryptography` on the host)
 docker compose exec identity python seed.py      # demo users; safe to run again
 ```
-Seed data for orders, tickets and policies arrives with M2–M4.
+```bash
+docker compose exec order python seed.py         # ten demo orders for the fixed demo customer ids; safe to run again
+```
+Seed data for tickets and policies arrives with M3–M4. Order tables are created by the order container's `alembic upgrade head` on startup.
 
 ## 11. Known limitations and deviations
 
 - `scripts/init_databases.sql` runs only when the Postgres volume is new; after changing it, run `docker compose down -v`.
 - Nginx resolves service hostnames once at startup. If you recreate a single service container (`docker compose up -d --build order`), run `docker compose restart nginx` if you see 502 errors.
 - Realtime has no WebSocket library yet (Uvicorn logs "No supported WebSocket library"); M6 adds one.
+- Deviation: the order seed script is `services/order/seed.py` for the same reason as identity's (it needs the service's models). Both are copied into the image: rebuild after editing them.
 - Deviation: the identity seed script is `services/identity/seed.py`, not in `/scripts`, because it needs the service's models, repository and password hashing (the file is copied into the image with the rest of the service folder; rebuild after editing it).
+- The order seed's dates are fixed when it first runs; after a few days the demo orders age (for example ORD-1001 will leave the electronics window). Run `docker compose down -v` and re-seed to reset.
+- Return requests can only be created, never rejected or cancelled, and refunds cannot be reversed (not in the milestone).
 - If `keys/` is missing when Compose starts, Docker creates empty root-owned `keys/private` and `keys/public` folders and identity stops with the "key not found" message; delete `keys/`, run `generate_keys.py`, and start again.
 - Login does not hide whether an email exists through timing (an unknown email returns slightly faster than a wrong password). Acceptable for this learning project.
 - Two simultaneous registrations of the same new email can make the loser get a 500 instead of 409 (the unique index still prevents a duplicate).
