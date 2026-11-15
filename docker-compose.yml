@@ -127,6 +127,35 @@ services:
       DATABASE_URL: ${KNOWLEDGE_DATABASE_URL}
       REDIS_URL: ${REDIS_URL}
       RABBITMQ_URL: ${RABBITMQ_URL}
+      JWT_PUBLIC_KEY_PATH: ${JWT_PUBLIC_KEY_PATH}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL}
+    # run the migration first, then start the API ($$ stops Compose from replacing PORT itself)
+    command: ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port $${PORT}"]
+    # only the public key folder: the knowledge service must never see the private key
+    volumes:
+      - ./keys/public:/keys/public:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  # Celery worker for the knowledge service: same image, different command. It ingests documents.
+  knowledge-worker:
+    build: ./services/knowledge
+    environment:
+      SERVICE_NAME: knowledge-worker
+      DATABASE_URL: ${KNOWLEDGE_DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      RABBITMQ_URL: ${RABBITMQ_URL}
+      # required by the shared config.py; the worker never checks tokens, so the key folder is not mounted
+      JWT_PUBLIC_KEY_PATH: ${JWT_PUBLIC_KEY_PATH}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL}
+    command: ["celery", "-A", "app.celery_app", "worker", "--loglevel=info"]
     depends_on:
       postgres:
         condition: service_healthy

@@ -8,6 +8,10 @@ class Settings(BaseSettings):
     database_url: str
     redis_url: str
     rabbitmq_url: str
+    jwt_public_key_path: str
+    # Used by rag.py to embed chunks and search queries (never hardcoded)
+    openai_api_key: str
+    embedding_model: str
 
 
 settings = Settings()

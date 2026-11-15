@@ -10,16 +10,18 @@ An AI Customer Support Automation Platform for a simulated e-commerce company, b
 
 - Browser → Nginx (`localhost:8080`) → services over REST. Nginx strips the prefix (`/api/orders/health` reaches the order service as `/health`).
 - WebSockets: `/ws/<path>` → realtime service as `/<path>`, with upgrade headers.
-- Planned (not built yet): gRPC for synchronous service-to-service calls (M5), RabbitMQ topic exchange `support.events` for events (M6), Celery for background jobs, Redis for Celery results, per-ticket locks and WebSocket fan-out.
+- Celery (M4): the knowledge service queues document ingestion on RabbitMQ (Celery's default `celery` queue, not the events exchange); the `knowledge-worker` container runs it; Redis is the Celery result backend.
+- Planned (not built yet): gRPC for synchronous service-to-service calls (M5), RabbitMQ topic exchange `support.events` for events (M6), Redis per-ticket locks and WebSocket fan-out.
 - Auth: Identity signs RS256 JWTs with a private key; every other service verifies them locally with the public key (no call to Identity).
-- Current state (M3): Identity, Order and Ticket have databases and real endpoints (REST only, no calls between services). Knowledge, agent and realtime only expose `GET /health`. Nothing uses Redis or RabbitMQ yet; the containers just wait for them to be healthy.
+- Current state (M4): Identity, Order, Ticket and Knowledge have databases and real endpoints (REST only, no calls between services). Knowledge also has a Celery worker and RAG search (OpenAI embeddings in pgvector). Agent and realtime only expose `GET /health`. RabbitMQ and Redis are used only by Celery so far.
 
 ## 3. Tech stack
 
 Python 3.12, FastAPI 0.162.7, Uvicorn 0.54.0, pydantic-settings 2.16.3. Postgres 17 + pgvector 0.8.2 (`pgvector/pgvector:0.8.2-pg17`), Redis 7.4 (`redis:7.4-alpine`), RabbitMQ 4.2 (`rabbitmq:4.2-management-alpine`), Nginx 1.28 (`nginx:1.28-alpine`). Docker Compose. Plain HTML/CSS/JS frontends.
 Identity (M1) also uses SQLAlchemy 2.1.8 (sync), psycopg 3.3.9 (binary), Alembic 1.20.1, PyJWT 2.15.1, cryptography 50.0.2, argon2-cffi 25.1.0, email-validator 2.3.0.
 Order (M2) and Ticket (M3) use the same pinned SQLAlchemy, psycopg, Alembic, PyJWT and cryptography versions as Identity.
-Later milestones add: Celery, pika/aio-pika, grpcio, LangChain/LangGraph (see `CLAUDE.md` section 7).
+Knowledge (M4) uses the same database/JWT pins plus Celery 5.7.0, redis 8.1.0, langchain-openai 1.8.0, langchain-core 1.8.0, langchain-text-splitters 1.1.3, langchain-postgres 0.0.19 (pulls in openai, pgvector-python, tiktoken, numpy).
+Later milestones add: pika/aio-pika, grpcio, LangGraph (see `CLAUDE.md` section 7).
 
 ## 4. Services
 
@@ -45,16 +47,30 @@ Published to the host: Nginx `8080`, RabbitMQ management UI `15672`. Service por
 ├── proto/                     # .gitkeep only (M5)
 ├── scripts/
 │   ├── init_databases.sql     # Postgres init: 5 databases + vector extension
-│   └── generate_keys.py       # creates the RSA key pair in keys/
+│   ├── generate_keys.py       # creates the RSA key pair in keys/
+│   └── check_knowledge_search.py  # M4: 10 questions against /api/knowledge/search (stdlib only, run on the host)
 ├── frontend/
 │   ├── customer/  index.html, app.js (placeholder health check)
 │   └── agent/     index.html, app.js (placeholder health check)
 └── services/<identity|ticket|order|knowledge|agent|realtime>/
     ├── Dockerfile             # identical in all six
-    ├── requirements.txt       # M0 packages only, except identity, order, ticket (database + JWT packages added)
+    ├── requirements.txt       # M0 packages only, except identity, order, ticket, knowledge (database + JWT packages added)
     └── app/
         ├── main.py            # FastAPI app + GET /health
         └── config.py          # pydantic-settings
+
+services/knowledge/ (M4) additionally has:
+    ├── alembic.ini, alembic/  # same pattern; env.py ignores langchain_pg_* tables; versions/0001_create_documents.py
+    ├── seed.py                # creates the six policy documents from seed_docs/ (run inside the container)
+    ├── seed_docs/             # six customer-facing markdown files; file name = slug
+    └── app/
+        ├── database.py, models.py, schemas.py, errors.py, auth.py   # database/errors/auth copied from ticket (= identity)
+        ├── rag.py             # ALL RAG code: chunk, embed, store, delete, search (LangChain + PGVector)
+        ├── celery_app.py      # Celery app (RabbitMQ broker, Redis results)
+        ├── tasks.py           # ingest_document task
+        ├── routers/       document_router.py, search_router.py
+        ├── services/      document_service.py, search_service.py
+        └── repositories/  document_repository.py
 
 services/ticket/ (M3) additionally has:
     ├── alembic.ini, alembic/  # same pattern; versions/0001_create_ticket_tables.py
@@ -86,7 +102,7 @@ services/identity/ (M1) additionally has:
 
 ## 6. Data model
 
-Databases created by `scripts/init_databases.sql`: `identity_db`, `ticket_db`, `order_db`, `knowledge_db` (with `vector` extension), `agent_db`. `identity_db`, `order_db` and `ticket_db` have tables so far.
+Databases created by `scripts/init_databases.sql`: `identity_db`, `ticket_db`, `order_db`, `knowledge_db` (with `vector` extension), `agent_db`. `identity_db`, `order_db`, `ticket_db` and `knowledge_db` have tables so far.
 
 **identity_db**
 - `users`: `id` (UUID PK), `email` (varchar 255, unique index `ix_users_email`), `full_name` (200), `password_hash` (argon2), `role` (`customer` | `agent` | `admin`, check constraint), `created_at` (timestamptz, default `now()`).
@@ -102,6 +118,10 @@ Databases created by `scripts/init_databases.sql`: `identity_db`, `ticket_db`, `
 - `tickets`: `id`, `customer_id` (indexed), `customer_email` (copied from the JWT `email` claim at creation), `subject` (≤200), `status` (`open` | `awaiting_approval` | `escalated` | `resolved`), `assigned_agent_id` (nullable), `created_at`, `updated_at` (set to `now()` whenever a message is added or the status or assignment changes).
 - `messages`: `id`, `ticket_id` (FK, on delete cascade, indexed), `sender_type` (`customer` | `ai` | `agent` | `system`), `sender_id` (nullable; null for `ai`/`system`), `content` (text), `created_at`.
 - `approvals`: `id` (= the `approval_id` the order service will receive), `ticket_id` (FK), `action_type` (`refund`), `return_request_id` (UUID, **unique**, no FK: it lives in order_db), `amount` (`Numeric(10,2)`), `summary` (text), `status` (`pending` | `approved` | `rejected`), `auto_approved` (bool), `decided_by` (nullable), `decision_note` (nullable), `created_at`, `decided_at` (nullable; also set for auto-approvals).
+
+**knowledge_db**
+- `documents`: `id` (UUID PK), `slug` (varchar 100, **unique**, lowercase letters/digits/hyphens), `title` (200), `content` (text, markdown), `status` (`pending` | `processing` | `ready` | `failed`), `error_message` (text, nullable; last ingestion error), `chunk_count` (int, default 0), `created_at`, `updated_at` (set to `now()` on every status change).
+- `langchain_pg_collection`, `langchain_pg_embedding`: created and owned by LangChain's `PGVector` (not by Alembic; `alembic/env.py` has an `include_object` that skips `langchain_pg_*`, and `alembic check` reports no changes). Embedding rows: `id` (string, our chunk id), `collection_id`, `embedding` (`vector(1536)`), `document` (chunk text), `cmetadata` (JSONB). The knowledge API creates these tables and the collection at startup (`rag.open_vector_store()` in `main.py`).
 
 ## 7. Contracts
 
@@ -187,11 +207,52 @@ The REST API can never create `ai` or `system` messages. `ticket_service.add_mes
 | `00000000-0000-0000-0000-000000000202` | customer2 | Smartwatch not working | open | – | customer (ORD-1004 smartwatch won't turn on) |
 | `00000000-0000-0000-0000-000000000203` | customer3 | Where is my order? | resolved | – | customer (ORD-1009 not shipped) + agent1 reply |
 
-**gRPC:** none yet. **Events:** none yet. **Celery tasks:** none yet.
+**REST, knowledge** (through Nginx: `/api/knowledge/...`). Missing, invalid or expired token → 401; wrong role → 403; unknown id → 404; invalid input → 422. Staff = `agent` or `admin`. Customers have no access at all.
+| Endpoint | Roles | Result |
+|---|---|---|
+| `POST /documents` `{slug (^[a-z0-9]+(-[a-z0-9]+)*$, ≤100), title (1–200), content (markdown, 1–100000)}` | admin | **202** document with `status: pending`, ingestion queued; 409 duplicate slug |
+| `GET /documents` | staff | 200 list without `content` (`id, slug, title, status, error_message, chunk_count, created_at, updated_at`), by slug |
+| `GET /documents/{document_id}` | staff | 200 document with `content`; 404 |
+| `POST /documents/{document_id}/reingest` | admin | **202** document back to `pending` (chunk count kept until replaced), ingestion queued; allowed in any status |
+| `DELETE /documents/{document_id}` | admin | **204**; chunks deleted from PGVector first, then the row |
+| `POST /search` `{query (1–500), top_k (1–10, default 4)}` | staff | 200 `{results: [SearchResult]}`, best first. Staff-only because every search is a paid embedding call; the agent will use gRPC (M5) |
+No content updates: delete and re-create a document to change it.
+
+**SearchResult** (M5 copies this into the `.proto`): `document_id` (UUID string), `title` (document title), `section` (the H2 heading the chunk came from, or `Overview` for text before the first H2), `content` (chunk text, starting with `Title > Section` and a blank line), `score` (float, 4 decimals). **Score = 1 − cosine distance** = cosine similarity: PGVector's default distance is cosine (0 = identical direction), so higher is better and 1.0 is a perfect match. Seed-doc matches for good questions score about 0.53–0.82.
+
+**Ingestion flow:** create/reingest → service commits the row (`pending`) → `celery_app.send_task("app.tasks.ingest_document", [document_id])` → worker: `process_ingestion` sets `processing` → `rag.ingest_document_chunks` → `ready` + `chunk_count`, or on any error `failed` + `error_message` (`"<ErrorType>: <message>"`, ≤1000 chars), `chunk_count` 0, and the error is re-raised so Celery retries. Between retries the status shows `failed`, then `processing` again. A task for a deleted document logs a warning and does nothing.
+
+**RAG settings** (`app/rag.py`, constants at the top):
+- Split 1: `MarkdownHeaderTextSplitter` on `#` (→ metadata `title_heading`) and `##` (→ `section`), headers stripped from the text. Split 2: `RecursiveCharacterTextSplitter`, `CHUNK_SIZE = 800`, `CHUNK_OVERLAP = 100` characters.
+- Chunk text = `"{title} > {section}\n\n{text}"`. Metadata: `document_id` (string), `title`, `section`.
+- Embeddings: `OpenAIEmbeddings(model=EMBEDDING_MODEL)` (env, `text-embedding-3-small`), `EMBEDDING_DIMENSIONS = 1536`.
+- Store: `langchain_postgres.PGVector`, `COLLECTION_NAME = "knowledge_base"`, `embedding_length=1536`, `use_jsonb=True`, `create_extension=False` (the init script creates `vector`). Connection: the service's SQLAlchemy engine (from the `postgresql+psycopg://` `DATABASE_URL`).
+- **Chunk id = `"{document_id}:{chunk_number}"`** (0-based). Ingestion first deletes ids `0 … previous_chunk_count−1`, then adds the new chunks (PGVector upserts on id), so re-running never duplicates. Delete removes the same ids.
+- Entry points: `ingest_document_chunks(document_id, title, content, previous_chunk_count) -> int`, `delete_document_chunks(document_id, chunk_count)`, `search_chunks(query, top_k) -> list[dict]`; plus `open_vector_store()` used by all three and at API startup.
+
+**Celery** (first use in the project):
+- `app/celery_app.py`: app `knowledge`, broker `RABBITMQ_URL`, result backend `REDIS_URL`, JSON-only serialization, UTC. `include=["app.tasks"]`.
+- Task `app.tasks.ingest_document(document_id: str)`: opens its own DB session, calls `document_service.process_ingestion`, closes it. `autoretry_for=(Exception,)`, `retry_backoff=True` (with Celery's default jitter), `retry_backoff_max=60`, `max_retries=3` → at most 4 attempts.
+- Sent by name with `send_task`, so `document_service` does not import `tasks.py` (that would be a circular import).
+- Container `knowledge-worker`: same build as `knowledge`, command `celery -A app.celery_app worker --loglevel=info` (prefork, one process per CPU), no Beat, no Flower. Default queue `celery` on RabbitMQ (visible in the management UI).
+
+**Seed documents** (`docker compose exec knowledge python seed.py`; slug = file name in `services/knowledge/seed_docs/`, title = the H1; existing slugs skipped, so nothing is re-embedded; 39 chunks in total). **These facts must stay consistent with the Order and Ticket rules** (`return_service.py` constants, `REFUND_AUTO_APPROVE_LIMIT`); change both together.
+| Slug | Chunks | Key facts |
+|---|---|---|
+| `returns-policy` | 6 | 30 days from delivery, **15 for electronics**; only delivered items; per item; one return request per item; gift cards and perishables not returnable; unused, original packaging; start a return in the ticket chat with order number + item |
+| `refund-policy` | 6 | refund = price paid for the item; **≤ ₹5,000 automatic**, **above ₹5,000 reviewed** by support (usually within one business day); 5–7 business days to the original payment method; rejection reason always given; shipping fees not refunded |
+| `shipping-policy` | 7 | standard 3–7, express 1–3 business days; free shipping above ₹999; track with carrier + tracking number on the order; contact support if 10+ days past the estimated date; India only |
+| `cancellation-policy` | 5 | cancel only while `placed`; after shipping no cancellation, return after delivery instead; cancelled orders refunded in 5–7 business days |
+| `warranty-policy` | 7 | electronics 12 months, accessories 6, clothing none, from delivery; manufacturing defects; excludes physical and water damage; claim via support with order number; separate from the return window |
+| `general-faq` | 8 | support Mon–Sat 9:00–19:00 IST; AI assistant 24/7, humans in support hours; meaning of placed/shipped/delivered/cancelled; cards, UPI, net banking, COD; contact = open a ticket and chat |
+
+**Search check** (`python scripts/check_knowledge_search.py` on the host; logs in as agent1, `top_k=3`, maps `document_id` → slug via `GET /documents`): last run (2026-11-15) **rank 1: 10/10, top 3: 10/10**. Target: rank 1 ≥ 9/10, top 3 10/10. If results get worse, change the documents or chunking, never the questions.
+
+**gRPC:** none yet. **Events:** none yet. **Celery tasks:** `app.tasks.ingest_document` (knowledge, above).
 
 **Environment variables per service** (set in `docker-compose.yml`, values from `.env`):
-`SERVICE_NAME`, `PORT`, `ROOT_PATH` (the Nginx prefix), `DATABASE_URL` (not for realtime), `REDIS_URL`, `RABBITMQ_URL`. Identity also gets `JWT_PRIVATE_KEY_PATH`, `JWT_PUBLIC_KEY_PATH`, `ACCESS_TOKEN_EXPIRE_MINUTES`. Order also gets `JWT_PUBLIC_KEY_PATH` (and mounts only `keys/public`). Ticket gets `JWT_PUBLIC_KEY_PATH` and `REFUND_AUTO_APPROVE_LIMIT` (mounts only `keys/public`).
-`.env` also holds the three JWT settings above (paths are container paths), `POSTGRES_USER`, `POSTGRES_PASSWORD`, `<SERVICE>_DATABASE_URL` ×5, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`, `OPENAI_API_KEY`, `CHAT_MODEL`, `EMBEDDING_MODEL` (not passed to any service yet), `REFUND_AUTO_APPROVE_LIMIT` (ticket).
+`SERVICE_NAME`, `PORT`, `ROOT_PATH` (the Nginx prefix), `DATABASE_URL` (not for realtime), `REDIS_URL`, `RABBITMQ_URL`. Identity also gets `JWT_PRIVATE_KEY_PATH`, `JWT_PUBLIC_KEY_PATH`, `ACCESS_TOKEN_EXPIRE_MINUTES`. Order also gets `JWT_PUBLIC_KEY_PATH` (and mounts only `keys/public`). Ticket gets `JWT_PUBLIC_KEY_PATH` and `REFUND_AUTO_APPROVE_LIMIT` (mounts only `keys/public`). Knowledge gets `JWT_PUBLIC_KEY_PATH`, `OPENAI_API_KEY`, `EMBEDDING_MODEL` (mounts only `keys/public`). `knowledge-worker` gets the same variables as knowledge minus `PORT`/`ROOT_PATH` (`SERVICE_NAME=knowledge-worker`) and mounts no keys (it never checks tokens; the path is only required by `config.py`).
+`.env` also holds the three JWT settings above (paths are container paths), `POSTGRES_USER`, `POSTGRES_PASSWORD`, `<SERVICE>_DATABASE_URL` ×5, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`, `OPENAI_API_KEY`, `EMBEDDING_MODEL` (knowledge + worker), `CHAT_MODEL` (not passed to any service yet), `REFUND_AUTO_APPROVE_LIMIT` (ticket).
 
 ## 8. Milestone status
 
@@ -199,7 +260,7 @@ The REST API can never create `ai` or `system` messages. `ticket_service.add_mes
 - [x] M1 Identity
 - [x] M2 Order
 - [x] M3 Ticket
-- [ ] M4 Knowledge
+- [x] M4 Knowledge
 - [ ] M5 gRPC layer
 - [ ] M6 Events and Realtime
 - [ ] M7 Agent RAG
@@ -265,6 +326,18 @@ Delivered orders have a `BlueDart` shipment (`BD-<number>`, shipped 3 days befor
 - `action_type` defaults to `refund` and is the only accepted value; amounts must have at most 2 decimals and 10 digits (fits `Numeric(10,2)`). Summary and notes are 1–1000 characters, trimmed.
 - On a decision the ticket goes back to `open` only if it is `awaiting_approval` (a ticket staff already escalated or resolved keeps that status).
 - The ticket seed builds rows with the models directly (like the order seed) so it can set fixed ids and realistic message times.
+- Knowledge follows the order/ticket pattern (repositories flush, services commit); `auth.py`, `errors.py`, `database.py` and the alembic files copied from ticket.
+- PGVector gets the service's existing SQLAlchemy engine (built from the psycopg 3 URL) instead of the URL string, so it does not create a new connection pool on every call.
+- The knowledge API calls `rag.open_vector_store()` at startup to create PGVector's tables and collection once; otherwise the worker's parallel processes race to create them on the first ingestions.
+- `rag.open_vector_store()` is a small shared function (used by the three RAG entry points and startup); it builds the store on each call instead of caching it.
+- Score = 1 − cosine distance (cosine similarity), rounded to 4 decimals.
+- Text before the first H2 gets section `Overview`. A document that produces no chunks fails with "The document has no text to index".
+- On failure `chunk_count` is set to 0, because rag.py deletes the old chunks before embedding the new ones (most failures happen at the embedding call).
+- Re-ingest is allowed in any status (also `processing`): it is idempotent, and it is the only way to recover a document stuck in `pending`/`processing`.
+- `GET /documents` omits `content`; the single-document, create and re-ingest responses include it.
+- Search responses are wrapped as `{results: [...]}` (room for more fields later; matches a `repeated` field in the M5 `.proto`).
+- The seed script calls `document_service.create_document` (the same code as the API, so it also queues the ingestion); the title is the file's H1 line.
+- `search_service` re-checks query length and `top_k` (BadRequestError, 400) for the future gRPC caller; REST returns 422 before that.
 
 ## 10. How to run
 
@@ -283,7 +356,12 @@ docker compose exec order python seed.py         # ten demo orders for the fixed
 ```bash
 docker compose exec ticket python seed.py        # three demo tickets with messages; safe to run again
 ```
-Seed data for policies arrives with M4. Each service's tables are created by its container's `alembic upgrade head` on startup.
+```bash
+docker compose exec knowledge python seed.py     # six policy documents, ingested by the worker; safe to run again (no re-embedding)
+docker compose logs -f knowledge-worker          # watch the ingestion
+python scripts/check_knowledge_search.py         # on the host, after the documents are ready (standard library only)
+```
+`.env` needs a real `OPENAI_API_KEY` for ingestion and search. Each service's tables are created by its container's `alembic upgrade head` on startup (PGVector's tables by the knowledge API at startup).
 
 ## 11. Known limitations and deviations
 
@@ -301,6 +379,13 @@ Seed data for policies arrives with M4. Each service's tables are created by its
 - FastAPI logs a deprecation warning about the `root_path` constructor argument (from M0); it still works. Fix later by passing `--root-path` to Uvicorn.
 - Deciding one approval moves an `awaiting_approval` ticket back to `open` even if another approval on the same ticket is still pending (rare; the remaining one still shows in `GET /approvals?status=pending`).
 - Staff can set a ticket that is `awaiting_approval` to `open`/`escalated`/`resolved` by hand; the pending approval stays pending.
+- Knowledge: if enqueueing fails after the document is saved (for example RabbitMQ is down), the API returns 500 and the document stays `pending` until it is re-ingested.
+- Knowledge: a document deleted while its ingestion is running can leave orphaned chunks (the worker stores them after the delete). Re-create the slug and delete it again, or clean up by `cmetadata->>'document_id'`.
+- Knowledge: if an ingestion fails before the old chunks are deleted (e.g. a database error), `chunk_count` shows 0 while old chunks still exist; the next successful ingestion overwrites the same ids, so nothing is duplicated.
+- Knowledge: the vector column is fixed at 1536 dimensions; changing `EMBEDDING_MODEL` to a model with another size needs a new collection and table (`docker compose down -v`), and re-ingesting.
+- Knowledge: retries are not selective; permanent errors (bad API key, empty document) are also retried 3 times before ending `failed`.
+- Knowledge: an OpenAI error during `/search` returns a plain 500.
+- Celery runs as root in the container and prints a security warning at startup (harmless here; JSON-only serialization).
 - Message ordering uses `created_at` (transaction time) with `id` as a tie-breaker; two messages in one transaction would have the same timestamp (does not happen through the API).
 
 ## 12. Open items for later milestones
