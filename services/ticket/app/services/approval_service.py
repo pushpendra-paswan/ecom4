@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.errors import BadRequestError, ConflictError, NotFoundError
+from app.events import publish_event
 from app.models import Approval
 from app.repositories import approval_repository, ticket_repository
 
@@ -43,6 +44,7 @@ def create_approval(
         decided_at = None
 
     # Step 4: save the approval; the unique return_request_id stops two simultaneous requests
+    old_status = ticket.status
     try:
         approval = approval_repository.create(
             db, ticket.id, action_type, return_request_id, amount, summary, status, auto_approved, decided_at
@@ -66,6 +68,24 @@ def create_approval(
         status,
         " (auto-approved by policy)" if auto_approved else "",
     )
+
+    # Step 7: publish the events (after the commit). An auto-approval is already decided; a pending one is requested.
+    approval_data = {
+        "approval_id": approval.id,
+        "ticket_id": ticket.id,
+        "customer_id": ticket.customer_id,
+        "return_request_id": approval.return_request_id,
+        "action_type": approval.action_type,
+    }
+    if status == "pending":
+        publish_event("approval.requested", approval_data)
+    else:
+        publish_event("approval.decided", {**approval_data, "status": approval.status, "auto_approved": True})
+    if ticket.status != old_status:
+        publish_event(
+            "ticket.status_changed",
+            {"ticket_id": ticket.id, "customer_id": ticket.customer_id, "old_status": old_status, "new_status": ticket.status},
+        )
     return approval
 
 
@@ -98,12 +118,32 @@ def approve(db: Session, approval_id: uuid.UUID, decided_by: uuid.UUID, note: st
 
     # Step 4: the ticket is no longer waiting
     ticket = ticket_repository.get_by_id(db, approval.ticket_id)
-    if ticket.status == "awaiting_approval":
+    old_status = ticket.status
+    if old_status == "awaiting_approval":
         ticket_repository.update_status(db, ticket, "open")
 
     # Step 5: save (this also releases the row lock)
     db.commit()
     logger.info("Approval %s approved by %s", approval.id, decided_by)
+
+    # Step 6: publish the decision, and the ticket's status change if there was one
+    publish_event(
+        "approval.decided",
+        {
+            "approval_id": approval.id,
+            "ticket_id": ticket.id,
+            "customer_id": ticket.customer_id,
+            "return_request_id": approval.return_request_id,
+            "action_type": approval.action_type,
+            "status": approval.status,
+            "auto_approved": False,
+        },
+    )
+    if ticket.status != old_status:
+        publish_event(
+            "ticket.status_changed",
+            {"ticket_id": ticket.id, "customer_id": ticket.customer_id, "old_status": old_status, "new_status": ticket.status},
+        )
     return approval
 
 
@@ -126,10 +166,30 @@ def reject(db: Session, approval_id: uuid.UUID, decided_by: uuid.UUID, note: str
 
     # Step 5: the ticket is no longer waiting
     ticket = ticket_repository.get_by_id(db, approval.ticket_id)
-    if ticket.status == "awaiting_approval":
+    old_status = ticket.status
+    if old_status == "awaiting_approval":
         ticket_repository.update_status(db, ticket, "open")
 
     # Step 6: save (this also releases the row lock)
     db.commit()
     logger.info("Approval %s rejected by %s", approval.id, decided_by)
+
+    # Step 7: publish the decision, and the ticket's status change if there was one
+    publish_event(
+        "approval.decided",
+        {
+            "approval_id": approval.id,
+            "ticket_id": ticket.id,
+            "customer_id": ticket.customer_id,
+            "return_request_id": approval.return_request_id,
+            "action_type": approval.action_type,
+            "status": approval.status,
+            "auto_approved": False,
+        },
+    )
+    if ticket.status != old_status:
+        publish_event(
+            "ticket.status_changed",
+            {"ticket_id": ticket.id, "customer_id": ticket.customer_id, "old_status": old_status, "new_status": ticket.status},
+        )
     return approval

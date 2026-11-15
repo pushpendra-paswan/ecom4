@@ -32,6 +32,20 @@ python scripts/grpc_client_check.py   # with the stack up and seeded: one PASS/F
 `grpcio-tools` is installed on the host only, never in the services. It bundles protoc 35.1, whose generated code
 requires `protobuf>=7.35.1` and `grpcio>=1.85.1` at runtime; the services pin exactly those, so change all three together.
 
+## Events and Realtime (M6)
+
+The Ticket service publishes events to RabbitMQ (`support.events`); the Realtime service pushes them to browsers
+over WebSockets (`ws://localhost:8080/ws/connect`). Realtime can run as several instances:
+
+```bash
+docker compose up --build --scale realtime=2
+```
+
+Scale on `up`: Nginx resolves the `realtime` replicas when it starts. If you change the number of replicas while
+Nginx is already running, run `docker compose restart nginx`.
+
+Throwaway test page (open it in several tabs, one per user): http://localhost:8080/test/realtime.html
+
 ## URLs
 
 | What | URL |
@@ -43,5 +57,6 @@ requires `protobuf>=7.35.1` and `grpcio>=1.85.1` at runtime; the services pin ex
 | Order API | http://localhost:8080/api/orders/health (Swagger: `/api/orders/docs`) |
 | Knowledge API | http://localhost:8080/api/knowledge/health (Swagger: `/api/knowledge/docs`) |
 | Agent API | http://localhost:8080/api/agent/health (Swagger: `/api/agent/docs`) |
-| Realtime | http://localhost:8080/ws/health (WebSockets under `ws://localhost:8080/ws/`) |
+| Realtime | http://localhost:8080/ws/health (WebSocket: `ws://localhost:8080/ws/connect`) |
+| Realtime test page (M6, throwaway) | http://localhost:8080/test/realtime.html |
 | RabbitMQ management UI | http://localhost:15672 (user/password from `.env`) |

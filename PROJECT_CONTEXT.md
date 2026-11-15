@@ -9,12 +9,13 @@ An AI Customer Support Automation Platform for a simulated e-commerce company, b
 ## 2. Architecture and communication
 
 - Browser → Nginx (`localhost:8080`) → services over REST. Nginx strips the prefix (`/api/orders/health` reaches the order service as `/health`).
-- WebSockets: `/ws/<path>` → realtime service as `/<path>`, with upgrade headers.
+- WebSockets: `/ws/<path>` → realtime service as `/<path>`, with upgrade headers. The one endpoint is `ws://localhost:8080/ws/connect` (FastAPI path `/connect`).
+- Events (M6): the Ticket service publishes domain events to the RabbitMQ topic exchange `support.events` right after each commit (`pika`, one short-lived connection per publish). The Realtime service (async, `aio-pika`) consumes them from one shared durable queue `realtime.events` (competing consumers: each event goes to one instance), republishes each event to the Redis pub/sub channel `realtime:events`, and every Realtime instance delivers what it receives on that channel to its own WebSocket connections. So each event reaches each connection once, whichever instance holds it. Events carry IDs only; browsers refetch details over REST.
 - Celery (M4): the knowledge service queues document ingestion on RabbitMQ (Celery's default `celery` queue, not the events exchange); the `knowledge-worker` container runs it; Redis is the Celery result backend.
 - gRPC (M5): Order (50051), Knowledge (50052) and Ticket (50053) run a synchronous gRPC server **in the same container and process** as their FastAPI app, beside REST. Servicers are thin entry points that call the same service functions as the routers. Every call carries a short-lived HS256 service token checked by a server interceptor. The only intended caller so far is the agent service (M7+); today only `scripts/grpc_client_check.py` calls them.
-- Planned (not built yet): RabbitMQ topic exchange `support.events` for events (M6), Redis per-ticket locks and WebSocket fan-out.
+- Planned (not built yet): Redis per-ticket locks for agent runs (M7); event consumers in the agent (M7, `ticket.message_created`) and order (M9, `approval.decided`) services.
 - Auth: Identity signs RS256 JWTs with a private key; every other service verifies them locally with the public key (no call to Identity).
-- Current state (M5): Identity, Order, Ticket and Knowledge have databases and real REST endpoints; Order, Knowledge and Ticket also serve gRPC. No service calls another yet. Knowledge also has a Celery worker and RAG search (OpenAI embeddings in pgvector). Agent and realtime only expose `GET /health`. RabbitMQ and Redis are used only by Celery so far.
+- Current state (M6): Identity, Order, Ticket and Knowledge have databases and real REST endpoints; Order, Knowledge and Ticket also serve gRPC. No service calls another over gRPC yet. Knowledge also has a Celery worker and RAG search (OpenAI embeddings in pgvector). Ticket publishes events; Realtime pushes them to browsers over WebSockets and can run as several instances. Agent only exposes `GET /health`. RabbitMQ carries Celery tasks and events; Redis is the Celery result backend and the Realtime fan-out channel.
 
 ## 3. Tech stack
 
@@ -23,7 +24,8 @@ Identity (M1) also uses SQLAlchemy 2.1.8 (sync), psycopg 3.3.9 (binary), Alembic
 Order (M2) and Ticket (M3) use the same pinned SQLAlchemy, psycopg, Alembic, PyJWT and cryptography versions as Identity.
 Knowledge (M4) uses the same database/JWT pins plus Celery 5.7.0, redis 8.1.0, langchain-openai 1.8.0, langchain-core 1.8.0, langchain-text-splitters 1.1.3, langchain-postgres 0.0.19 (pulls in openai, pgvector-python, tiktoken, numpy).
 Order, Knowledge and Ticket (M5) add grpcio 1.85.1 and protobuf 7.35.1. Host only (never in a service): grpcio-tools 1.85.1 (bundles protoc 35.1) for code generation, plus PyJWT 2.15.1 for the check script.
-Later milestones add: pika/aio-pika, LangGraph (see `CLAUDE.md` section 7).
+Ticket (M6) adds pika 1.4.4. Realtime (M6) uses FastAPI, `uvicorn[standard]` 0.54.0 (WebSocket support), pydantic-settings, aio-pika 10.2.3, redis 8.1.0 (asyncio client), PyJWT 2.15.1, cryptography 50.0.2. No database.
+Later milestones add: LangGraph (see `CLAUDE.md` section 7).
 
 ## 4. Services
 
@@ -34,7 +36,7 @@ Later milestones add: pika/aio-pika, LangGraph (see `CLAUDE.md` section 7).
 | order | Mock orders, returns, simulated refunds | 8003 | 50051 | order_db | `/api/orders/` |
 | knowledge | Policy documents, RAG search | 8004 | 50052 | knowledge_db (pgvector) | `/api/knowledge/` |
 | agent | LangGraph AI agent | 8005 | – | agent_db | `/api/agent/` |
-| realtime | WebSocket push to browsers | 8006 | – | none | `/ws/` |
+| realtime | WebSocket push to browsers (scalable: `--scale realtime=2`) | 8006 | – | none | `/ws/` |
 
 Published to the host: Nginx `8080`, RabbitMQ management UI `15672`, and the three gRPC ports **bound to `127.0.0.1` only** (`127.0.0.1:50051:50051` etc.) so the host-side check script can reach them; this is a development-only choice (other containers use `order:50051`, `knowledge:50052`, `ticket:50053`). REST service ports, Postgres, Redis and AMQP are internal only.
 
@@ -56,13 +58,25 @@ Published to the host: Nginx `8080`, RabbitMQ management UI `15672`, and the thr
 │   └── generated/             # M5: generated stubs for all three protos (committed)
 ├── frontend/
 │   ├── customer/  index.html, app.js (placeholder health check)
-│   └── agent/     index.html, app.js (placeholder health check)
+│   ├── agent/     index.html, app.js (placeholder health check)
+│   └── test/      realtime.html   # M6 THROWAWAY WebSocket test page; delete (with nginx's /test/ location) once M11/M12 exist
 └── services/<identity|ticket|order|knowledge|agent|realtime>/
     ├── Dockerfile             # identical in all six
-    ├── requirements.txt       # M0 packages only, except identity, order, ticket, knowledge (database + JWT packages added)
+    ├── requirements.txt       # M0 packages only for agent; the others add what they use (see section 3)
     └── app/
         ├── main.py            # FastAPI app + GET /health
         └── config.py          # pydantic-settings
+
+services/realtime/ (M6, no database, the only async service):
+    └── app/
+        ├── main.py            # FastAPI app, GET /health, lifespan starts/stops the two background tasks
+        ├── config.py          # RABBITMQ_URL, REDIS_URL, JWT_PUBLIC_KEY_PATH, instance_id (= hostname)
+        ├── auth.py            # only decode_access_token(token) (deviation from the auth.py copy contract)
+        ├── connections.py     # in-memory rooms: user_rooms {user_id: set of sockets}, staff_room (set); add, remove, deliver_to_rooms
+        ├── events.py          # consume_rabbitmq_events (aio-pika → Redis) and subscribe_redis_events (Redis → local sockets)
+        └── routers/ws_router.py   # WebSocket /connect: auth handshake, ping/pong, cleanup
+
+services/ticket/ (M6) additionally has app/events.py: publish_event(event_type, data) (pika, called by the services after each commit).
 
 services/order/, services/knowledge/, services/ticket/ (M5) additionally have:
     └── app/
@@ -310,10 +324,44 @@ No content updates: delete and re-create a document to change it.
 
 *Code generation:* `python scripts/generate_proto.py` (host, from the repo root) runs `grpc_tools.protoc` per target: each service gets only its own proto in `app/generated/`, `scripts/generated/` gets all three; it writes an `__init__.py` and rewrites `import x_pb2 as ...` in `*_pb2_grpc.py` to `from . import x_pb2 as ...` (the absolute import breaks inside a package). Generated code is committed; regenerating with the same versions is byte-identical. **Pins must match:** grpcio-tools 1.85.1 bundles protoc 35.1; its `*_pb2.py` refuses to load on protobuf < 7.35.1 and its `*_pb2_grpc.py` on grpcio < 1.85.1. Services pin `grpcio==1.85.1`, `protobuf==7.35.1`. Upgrade all three together and regenerate.
 
-**Events:** none yet. **Celery tasks:** `app.tasks.ingest_document` (knowledge, above).
+**Events (M6).** RabbitMQ topic exchange **`support.events`** (durable). Routing key = `event_type`. Messages are persistent (`delivery_mode=2`), `content_type: application/json`, `message_id` = `event_id`. Envelope:
+`{"event_id": "<uuid4>", "event_type": "ticket.created", "occurred_at": "2026-11-15T10:00:00.123456+00:00", "data": {...}}`. All ids in `data` are UUID strings. Events carry IDs and a few small fields, **never message text, amounts or full objects**.
+
+| Event (= routing key) | Published when (by `ticket_service` / `approval_service`, after the commit) | `data` fields | Consumers |
+|---|---|---|---|
+| `ticket.created` | a ticket is created (REST) | `ticket_id`, `customer_id` | realtime |
+| `ticket.message_created` | any message is added: ticket creation (first message), REST `POST .../messages`, gRPC `PostMessage` | `ticket_id`, `customer_id`, `message_id`, `sender_type` | realtime (agent from M7) |
+| `ticket.status_changed` | every real status change: staff `PATCH .../status` (not when setting the same status), customer message reopening a `resolved` ticket, pending approval → `awaiting_approval`, decision → back to `open` | `ticket_id`, `customer_id`, `old_status`, `new_status` | realtime |
+| `ticket.assigned` | `POST .../assign` | `ticket_id`, `customer_id`, `assigned_agent_id` | realtime |
+| `approval.requested` | an approval is created as `pending` (REST or gRPC) | `approval_id`, `ticket_id`, `customer_id`, `return_request_id`, `action_type` | realtime (staff only) |
+| `approval.decided` | approve, reject, **or auto-approval at creation** | same as above + `status` (`approved`/`rejected`), `auto_approved` (bool) | realtime (staff only; order from M9) |
+Order of events for one action: create ticket → `ticket.created`, `ticket.message_created`; customer message on a resolved ticket → `ticket.message_created`, `ticket.status_changed`; pending approval → `approval.requested`, `ticket.status_changed` (only if the ticket was not already `awaiting_approval`); auto-approval → `approval.decided` only; decision → `approval.decided`, `ticket.status_changed` (only if the ticket was `awaiting_approval`). The approval amount is not in the events: in M9 Order fetches the approval over gRPC.
+
+*Publishing* (`services/ticket/app/events.py`, `publish_event(event_type, data)`): builds the envelope, opens a **new `pika.BlockingConnection` per publish** (pika is not thread-safe; REST and gRPC run on several threads) with `connection_attempts=1` and 3 s `socket_timeout`/`stack_timeout`/`blocked_connection_timeout`, declares the exchange, publishes, closes. Any error is logged (`Could not publish event ...`) and swallowed: the request still succeeds and the event is lost. Routers and the gRPC servicer were not changed; both reach the same service functions.
+
+*Realtime consumption and fan-out:*
+1. Every instance consumes from the **same durable queue `realtime.events`**, bound to `support.events` with `#`, manual ack, `prefetch_count=1` (RabbitMQ hands events out in turn; each goes to exactly one instance). `aio_pika.connect_robust` reconnects and restores the consumer after a drop; a retry loop (2 s) covers only the first connect.
+2. The receiving instance publishes the raw message body to the **Redis pub/sub channel `realtime:events`**, then acks. If the Redis publish fails it waits 2 s and `nack(requeue=True)`s (redelivered, maybe to another instance). A body that is not a JSON event is logged and acked (dropped).
+3. **Every** instance subscribes to `realtime:events` (retry loop with a 2 s sleep after any error) and delivers to its own local sockets by the routing rules.
+
+*Rooms and routing* (in-memory per instance, `connections.py`): every authenticated socket is in `user:<user_id>`; `agent`/`admin` sockets are also in `staff`. `ticket.*` → `staff` + `user:<data.customer_id>`; `approval.*` → `staff` only; any other type → `staff` only. A socket in two matching rooms gets the event once. No per-ticket rooms: browsers filter by `ticket_id` themselves. A socket whose send fails or takes over 5 s is removed from its rooms.
+
+*WebSocket protocol* (`ws://localhost:8080/ws/connect`; Nginx strips `/ws`, FastAPI path `/connect`):
+| Direction | Message |
+|---|---|
+| client → server (first, within **5 s**) | `{"type": "auth", "token": "<jwt>"}`; token verified locally (RS256, public key, expiry, required `sub`, `email`, `role`, `exp`) |
+| server → client | `{"type": "auth_ok", "user_id": "...", "role": "...", "instance": "<container hostname>"}` |
+| server closes | code **4401** (reason `Unauthorized`) on timeout, non-JSON, a first message that is not `auth`, or an invalid/expired token |
+| client → server | `{"type": "ping"}` → `{"type": "pong"}`; anything else → `{"type": "error", "message": "Unknown message type"}` (or `"Messages must be JSON"`) |
+| server → client | `{"type": "event", "event": <envelope>}` |
+Delivery is **at-least-once** (a RabbitMQ redelivery can repeat an event): clients treat events as "refresh" signals and may deduplicate by `event_id`. Realtime REST: only `GET /health` (also returns `instance`). Logs (`docker compose logs realtime`) show `[<instance>] connected / disconnected / forwarded ... to Redis / delivered ... to N local connection(s)`.
+
+*Test page* (`frontend/test/realtime.html`, **throwaway**, delete once the real frontends exist): http://localhost:8080/test/realtime.html. Log in (prefilled customer1), Connect, "Connect with a bad token" (closes 4401), Send ping, status line with `auth_ok` and the instance id, event log (newest first) with type, `event_id` and `data`; on `ticket.message_created` it fetches the ticket over REST with the tab's token and lists its messages; a repeated `event_id` is shown as **DUPLICATE** in red. Token per tab in `sessionStorage`.
+
+**Celery tasks:** `app.tasks.ingest_document` (knowledge, above). Events never use Celery.
 
 **Environment variables per service** (set in `docker-compose.yml`, values from `.env`):
-`SERVICE_NAME`, `PORT`, `ROOT_PATH` (the Nginx prefix), `DATABASE_URL` (not for realtime), `REDIS_URL`, `RABBITMQ_URL`. Identity also gets `JWT_PRIVATE_KEY_PATH`, `JWT_PUBLIC_KEY_PATH`, `ACCESS_TOKEN_EXPIRE_MINUTES`. Order also gets `JWT_PUBLIC_KEY_PATH` (and mounts only `keys/public`). Ticket gets `JWT_PUBLIC_KEY_PATH` and `REFUND_AUTO_APPROVE_LIMIT` (mounts only `keys/public`). Knowledge gets `JWT_PUBLIC_KEY_PATH`, `OPENAI_API_KEY`, `EMBEDDING_MODEL` (mounts only `keys/public`). `knowledge-worker` gets the same variables as knowledge minus `PORT`/`ROOT_PATH` (`SERVICE_NAME=knowledge-worker`) and mounts no keys (it never checks tokens; the path is only required by `config.py`).
+`SERVICE_NAME`, `PORT`, `ROOT_PATH` (the Nginx prefix), `DATABASE_URL` (not for realtime), `REDIS_URL`, `RABBITMQ_URL`. Identity also gets `JWT_PRIVATE_KEY_PATH`, `JWT_PUBLIC_KEY_PATH`, `ACCESS_TOKEN_EXPIRE_MINUTES`. Order also gets `JWT_PUBLIC_KEY_PATH` (and mounts only `keys/public`). Ticket gets `JWT_PUBLIC_KEY_PATH` and `REFUND_AUTO_APPROVE_LIMIT` (mounts only `keys/public`). Knowledge gets `JWT_PUBLIC_KEY_PATH`, `OPENAI_API_KEY`, `EMBEDDING_MODEL` (mounts only `keys/public`). Realtime (M6) gets `JWT_PUBLIC_KEY_PATH` (mounts only `keys/public`), no `DATABASE_URL`; it has no `container_name` and no host port so it can be scaled. `knowledge-worker` gets the same variables as knowledge minus `PORT`/`ROOT_PATH` (`SERVICE_NAME=knowledge-worker`) and mounts no keys (it never checks tokens; the path is only required by `config.py`).
 M5: order, knowledge and ticket also get `GRPC_PORT` (50051 / 50052 / 50053), `SERVICE_TOKEN_SECRET` (`${SERVICE_TOKEN_SECRET:?...}`: Compose refuses to start if it is unset or empty) and `GRPC_ALLOWED_CALLERS` (`agent`). The worker gets `GRPC_PORT: 50052`, `SERVICE_TOKEN_SECRET: not-used-by-the-worker` and `GRPC_ALLOWED_CALLERS: none` only because it shares `config.py`; it never starts a gRPC server and never sees the real secret.
 `.env` also holds the three JWT settings above (paths are container paths), `POSTGRES_USER`, `POSTGRES_PASSWORD`, `<SERVICE>_DATABASE_URL` ×5, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`, `OPENAI_API_KEY`, `EMBEDDING_MODEL` (knowledge + worker), `CHAT_MODEL` (not passed to any service yet), `REFUND_AUTO_APPROVE_LIMIT` (ticket), `SERVICE_TOKEN_SECRET` (M5; 64 hex characters from `secrets.token_hex(32)`; `.env.example` has a placeholder).
 
@@ -325,7 +373,7 @@ M5: order, knowledge and ticket also get `GRPC_PORT` (50051 / 50052 / 50053), `S
 - [x] M3 Ticket
 - [x] M4 Knowledge
 - [x] M5 gRPC layer
-- [ ] M6 Events and Realtime
+- [x] M6 Events and Realtime
 - [ ] M7 Agent RAG
 - [ ] M8 Agent order tools
 - [ ] M9 Approval and refund flow
@@ -353,7 +401,7 @@ Delivered orders have a `BlueDart` shipment (`BD-<number>`, shipped 3 days befor
 
 - Repo root is this folder (`ecom4/`), standing in for `ai-support-platform/`; the Compose project is named `ai-support-platform`.
 - Nginx strips the route prefix; each FastAPI app gets `ROOT_PATH` so Swagger `/docs` works through Nginx.
-- `/ws/` also strips its prefix: a future endpoint `/tickets/{id}` in realtime is reached at `ws://localhost:8080/ws/tickets/{id}`; realtime health is at `/ws/health`.
+- `/ws/` also strips its prefix: the realtime endpoint `/connect` is reached at `ws://localhost:8080/ws/connect`; realtime health is at `/ws/health`. Nginx keeps idle WebSockets for 24 h (`proxy_read_timeout`/`proxy_send_timeout 86400s`).
 - One identical Dockerfile; the port comes from the `PORT` env var. It copies the whole service folder so later files (alembic) need no Dockerfile change.
 - Database URLs use the SQLAlchemy psycopg 3 form `postgresql+psycopg://...` and are full values in `.env` (user/password repeated).
 - Postgres healthcheck uses `pg_isready -h 127.0.0.1` (TCP), so it only turns healthy after the init script has created the databases.
@@ -412,6 +460,17 @@ Delivered orders have a `BlueDart` shipment (`BD-<number>`, shipped 3 days befor
 - `KnowledgeService.Search` opens no DB session in the servicer: `search_service` → `rag.py` uses the engine directly.
 - `SearchResult.score` is a `double` (a 32-bit `float` would turn 0.6123 into 0.61230000257).
 - Service tokens: missing secret is caught by Compose's `${SERVICE_TOKEN_SECRET:?...}` rather than by code. The allowlists are literal values in `docker-compose.yml` (like `PORT`), not `.env` entries.
+- Events are notification-only (IDs and a few small fields, no content); browsers refetch over REST, so authorization stays in one place (the owning service).
+- No per-ticket rooms or subscriptions: only `user:<id>` and `staff`; browsers filter events by `ticket_id` themselves.
+- Multi-instance Realtime: one shared RabbitMQ queue (competing consumers) + Redis pub/sub fan-out, so an event is consumed once and delivered once per connection whichever instance holds it.
+- Publishing lives in the service layer after each commit (`publish_event`), so REST and gRPC both publish without changes to routers or the servicer.
+- `ticket.status_changed` is published only when the status really changes (staff setting the current status again publishes nothing; a second pending approval on an `awaiting_approval` ticket publishes only `approval.requested`).
+- Envelope UUIDs are serialized with `json.dumps(default=str)`; the services pass model attributes straight in. Event data is read from the models after the commit (SQLAlchemy reloads them), the old status is captured before the change.
+- Realtime consumer uses `prefetch_count=1` (simple, ordered per instance, fair round robin between instances); throughput is far beyond what the demo needs.
+- Realtime forwards the raw RabbitMQ body to Redis unchanged; it only parses it to reject non-JSON messages (acked and dropped, so a poison message cannot loop forever).
+- Realtime auth failures (timeout, bad JSON, wrong first message, bad token) all close with 4401; the server accepts the socket first, because a close code can only be sent on an accepted WebSocket.
+- Instance id = container hostname (Docker sets it to the short container id), also returned by `/ws/health` so Nginx's round robin is visible.
+- The test page is one self-contained HTML file with inline CSS and JS (allowed for a throwaway page); Nginx has a `/test/` location for it.
 - `grpc_client_check.py` reads `SERVICE_TOKEN_SECRET` by scanning the repo's `.env` (stdlib only) and mints a fresh token per call with PyJWT; it exits with status 1 if any step fails.
 
 ## 10. How to run
@@ -442,13 +501,30 @@ pip install grpcio-tools==1.85.1 grpcio==1.85.1 protobuf==7.35.1 PyJWT==2.15.1
 python scripts/generate_proto.py                 # only after changing a .proto (generated code is committed)
 python scripts/grpc_client_check.py              # needs the stack up and the identity, order, ticket and knowledge seeds
 ```
+```bash
+# M6 events and realtime
+docker compose up --build --scale realtime=2     # two Realtime instances; scale on `up` (else `docker compose restart nginx`)
+# then open http://localhost:8080/test/realtime.html in several tabs (one user per tab)
+# RabbitMQ UI http://localhost:15672: exchange support.events, queue realtime.events with 2 consumers
+```
 `.env` needs `SERVICE_TOKEN_SECRET` (M5) and a real `OPENAI_API_KEY` for ingestion and search. Each service's tables are created by its container's `alembic upgrade head` on startup (PGVector's tables by the knowledge API at startup).
 
 ## 11. Known limitations and deviations
 
 - `scripts/init_databases.sql` runs only when the Postgres volume is new; after changing it, run `docker compose down -v`.
 - Nginx resolves service hostnames once at startup. If you recreate a single service container (`docker compose up -d --build order`), run `docker compose restart nginx` if you see 502 errors.
-- Realtime has no WebSocket library yet (Uvicorn logs "No supported WebSocket library"); M6 adds one.
+- Events are lost if RabbitMQ is down at publish time (no outbox). The request still succeeds; the ticket log shows `Could not publish event ...`.
+- Event delivery is at-least-once (a RabbitMQ redelivery, e.g. after an ack is lost, repeats an event); clients must tolerate duplicates (dedupe by `event_id`).
+- A token that expires while a WebSocket stays open is not rechecked; the connection keeps receiving events until it closes.
+- A new RabbitMQ connection is opened for every publish (simple and thread-safe, but slower than a pooled connection; a handful of events per request is fine).
+- Redis pub/sub has no buffer: an instance whose Redis subscription is down (or reconnecting) misses the events published meanwhile, and its clients do not get them. Browsers should refetch after reconnecting.
+- If Redis is down, events stay in the RabbitMQ queue (requeued every 2 s) and are delivered when Redis is back; after a Redis restart the first forward on a stale connection fails once and is requeued.
+- Nginx resolves the `realtime` replicas only at startup: after `docker compose up --scale realtime=N` on a running stack, restart Nginx. A stopped replica keeps receiving new connection attempts until then (Nginx retries the next one).
+- Rooms are in memory per instance; restarting an instance drops its WebSockets (clients must reconnect).
+- One slow client can delay delivery to others on the same instance by up to 5 s per event (sends are sequential, with a 5 s timeout).
+- Events are published after the commit but outside the transaction: a crash between commit and publish loses the event.
+- Realtime also logs FastAPI's `root_path` deprecation warning (same as the other services).
+- `frontend/test/realtime.html` is a throwaway verification page; delete it and Nginx's `/test/` location when M11/M12 exist.
 - Deviation: the ticket seed script is `services/ticket/seed.py`, for the same reason as identity's and order's.
 - Deviation: the order seed script is `services/order/seed.py` for the same reason as identity's (it needs the service's models). Both are copied into the image: rebuild after editing them.
 - Deviation: the identity seed script is `services/identity/seed.py`, not in `/scripts`, because it needs the service's models, repository and password hashing (the file is copied into the image with the rest of the service folder; rebuild after editing it).
@@ -484,3 +560,5 @@ python scripts/grpc_client_check.py              # needs the stack up and the id
 - `assigned_agent_id` is not validated against the Identity service (it is always the caller's own id from the token today).
 - `customer_email` on a ticket is a copy from the token; it is not updated if the user's email changes.
 - M10: a takeover flag on tickets (the AI must not reply when a human has taken over).
+- M7: the agent consumes `ticket.message_created` with **its own** durable queue (e.g. `agent.ticket_messages`, bound to `ticket.message_created`), not `realtime.events`; it must ignore messages whose `sender_type` is not `customer` (its own `ai` replies also produce this event) and be safe to run twice.
+- M9: Order consumes `approval.decided` with its own queue and deduplicates on `approval_id` (the refunds unique constraint already guarantees idempotency).
