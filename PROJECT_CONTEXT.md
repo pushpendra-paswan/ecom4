@@ -12,13 +12,13 @@ An AI Customer Support Automation Platform for a simulated e-commerce company, b
 - WebSockets: `/ws/<path>` → realtime service as `/<path>`, with upgrade headers.
 - Planned (not built yet): gRPC for synchronous service-to-service calls (M5), RabbitMQ topic exchange `support.events` for events (M6), Celery for background jobs, Redis for Celery results, per-ticket locks and WebSocket fan-out.
 - Auth: Identity signs RS256 JWTs with a private key; every other service verifies them locally with the public key (no call to Identity).
-- Current state (M2): Identity and Order have databases and real endpoints (REST only). The other four services only expose `GET /health`. Nothing uses Redis or RabbitMQ yet; the containers just wait for them to be healthy.
+- Current state (M3): Identity, Order and Ticket have databases and real endpoints (REST only, no calls between services). Knowledge, agent and realtime only expose `GET /health`. Nothing uses Redis or RabbitMQ yet; the containers just wait for them to be healthy.
 
 ## 3. Tech stack
 
 Python 3.12, FastAPI 0.162.7, Uvicorn 0.54.0, pydantic-settings 2.16.3. Postgres 17 + pgvector 0.8.2 (`pgvector/pgvector:0.8.2-pg17`), Redis 7.4 (`redis:7.4-alpine`), RabbitMQ 4.2 (`rabbitmq:4.2-management-alpine`), Nginx 1.28 (`nginx:1.28-alpine`). Docker Compose. Plain HTML/CSS/JS frontends.
 Identity (M1) also uses SQLAlchemy 2.1.8 (sync), psycopg 3.3.9 (binary), Alembic 1.20.1, PyJWT 2.15.1, cryptography 50.0.2, argon2-cffi 25.1.0, email-validator 2.3.0.
-Order (M2) uses the same pinned SQLAlchemy, psycopg, Alembic, PyJWT and cryptography versions as Identity.
+Order (M2) and Ticket (M3) use the same pinned SQLAlchemy, psycopg, Alembic, PyJWT and cryptography versions as Identity.
 Later milestones add: Celery, pika/aio-pika, grpcio, LangChain/LangGraph (see `CLAUDE.md` section 7).
 
 ## 4. Services
@@ -51,10 +51,19 @@ Published to the host: Nginx `8080`, RabbitMQ management UI `15672`. Service por
 │   └── agent/     index.html, app.js (placeholder health check)
 └── services/<identity|ticket|order|knowledge|agent|realtime>/
     ├── Dockerfile             # identical in all six
-    ├── requirements.txt       # M0 packages only, except identity (M1 packages added)
+    ├── requirements.txt       # M0 packages only, except identity, order, ticket (database + JWT packages added)
     └── app/
         ├── main.py            # FastAPI app + GET /health
         └── config.py          # pydantic-settings
+
+services/ticket/ (M3) additionally has:
+    ├── alembic.ini, alembic/  # same pattern; versions/0001_create_ticket_tables.py
+    ├── seed.py                # three demo tickets with messages (run inside the container)
+    └── app/
+        ├── database.py, models.py, schemas.py, errors.py, auth.py   # database/errors/auth copied from order (= identity)
+        ├── routers/       ticket_router.py, approval_router.py
+        ├── services/      ticket_service.py, approval_service.py
+        └── repositories/  ticket_repository.py, message_repository.py, approval_repository.py
 
 services/order/ (M2) additionally has:
     ├── alembic.ini, alembic/  # same pattern as identity; versions/0001_create_order_tables.py
@@ -77,7 +86,7 @@ services/identity/ (M1) additionally has:
 
 ## 6. Data model
 
-Databases created by `scripts/init_databases.sql`: `identity_db`, `ticket_db`, `order_db`, `knowledge_db` (with `vector` extension), `agent_db`. `identity_db` and `order_db` have tables so far.
+Databases created by `scripts/init_databases.sql`: `identity_db`, `ticket_db`, `order_db`, `knowledge_db` (with `vector` extension), `agent_db`. `identity_db`, `order_db` and `ticket_db` have tables so far.
 
 **identity_db**
 - `users`: `id` (UUID PK), `email` (varchar 255, unique index `ix_users_email`), `full_name` (200), `password_hash` (argon2), `role` (`customer` | `agent` | `admin`, check constraint), `created_at` (timestamptz, default `now()`).
@@ -88,6 +97,11 @@ Databases created by `scripts/init_databases.sql`: `identity_db`, `ticket_db`, `
 - `shipments`: `id`, `order_id` (FK, unique: one per order), `carrier`, `tracking_number`, `status` (`in_transit` | `delivered`), `shipped_on`, `estimated_delivery`, `delivered_on` (nullable). All dates are `date`.
 - `return_requests`: `id`, `order_id` (FK), `order_item_id` (FK, **unique**: an item is returned once), `customer_id` (indexed), `reason`, `refund_amount`, `status` (`requested` | `refunded`), `created_at`.
 - `refunds`: `id`, `return_request_id` (FK, **unique**), `approval_id` (**unique**), `amount`, `status` (`completed`), `created_at`.
+
+**ticket_db** (UUID primary keys, statuses plain varchar; customers and agents are referenced by UUID only, no foreign keys to other services)
+- `tickets`: `id`, `customer_id` (indexed), `customer_email` (copied from the JWT `email` claim at creation), `subject` (≤200), `status` (`open` | `awaiting_approval` | `escalated` | `resolved`), `assigned_agent_id` (nullable), `created_at`, `updated_at` (set to `now()` whenever a message is added or the status or assignment changes).
+- `messages`: `id`, `ticket_id` (FK, on delete cascade, indexed), `sender_type` (`customer` | `ai` | `agent` | `system`), `sender_id` (nullable; null for `ai`/`system`), `content` (text), `created_at`.
+- `approvals`: `id` (= the `approval_id` the order service will receive), `ticket_id` (FK), `action_type` (`refund`), `return_request_id` (UUID, **unique**, no FK: it lives in order_db), `amount` (`Numeric(10,2)`), `summary` (text), `status` (`pending` | `approved` | `rejected`), `auto_approved` (bool), `decided_by` (nullable), `decision_note` (nullable), `created_at`, `decided_at` (nullable; also set for auto-approvals).
 
 ## 7. Contracts
 
@@ -136,18 +150,55 @@ Error mapping (identity `main.py`): `NotFoundError` 404, `UnauthorizedError` 401
 
 **Refund execution** (`refund_service.execute_refund`, simulated, logs one INFO line per refund): amount always comes from the return request. Idempotent through the unique constraints on `refunds.approval_id` and `refunds.return_request_id`: a repeated `approval_id` returns the existing refund; if two calls race, the loser's insert fails, it rolls back and returns the winner's refund (same approval) or a 409 (different approval). Verified with 8 parallel calls: exactly one 201. In M9 a Celery task will call this same function.
 
+**REST, ticket** (through Nginx: `/api/tickets/...`). Missing, invalid or expired token → 401; wrong role → 403. A customer asking for someone else's ticket gets **404**. Staff = `agent` or `admin`.
+| Endpoint | Roles | Result |
+|---|---|---|
+| `POST /tickets` `{subject (1–200), message (1–5000)}` | customer | 201 `{ticket, messages: [first message]}`; ticket and first message saved in one transaction |
+| `GET /tickets?status=` | customer (own), staff (all) | 200 list of tickets, newest `updated_at` first; optional `status` filter (422 for an unknown status) |
+| `GET /tickets/{ticket_id}` | customer (own), staff (any) | 200 `{ticket, messages}` (messages oldest first); 404 |
+| `POST /tickets/{ticket_id}/messages` `{content (1–5000)}` | customer (own), staff (any) | 201 message; `sender_type` is `customer` for customers and `agent` for agents **and admins**; 404 |
+| `POST /tickets/{ticket_id}/assign` | staff | 200 ticket assigned to the caller (re-assigning to yourself is allowed; overwrites another agent) |
+| `PATCH /tickets/{ticket_id}/status` `{status}` | staff | 200 ticket; only `open`, `escalated`, `resolved` (anything else 422) |
+| `POST /tickets/{ticket_id}/approvals` `{action_type: "refund" (default), return_request_id, amount (>0, 2 decimals), summary (1–1000)}` | **admin only** (testing entry point; the agent uses gRPC from M5/M9) | 201 approval; 404 unknown ticket; 409 return request already has an approval |
+| `GET /approvals?status=` | staff | 200 list, newest first; optional `status` (`pending`/`approved`/`rejected`) |
+| `GET /approvals/{approval_id}` | staff | 200 approval; 404 |
+| `POST /approvals/{approval_id}/approve` `{note?}` (body optional) | staff | 200 approval (`approved`, `decided_by` = caller); 409 already decided; 404 |
+| `POST /approvals/{approval_id}/reject` `{note}` (required, not blank) | staff | 200 approval (`rejected`, note stored); 422 missing/blank note; 409 already decided; 404 |
+The REST API can never create `ai` or `system` messages. `ticket_service.add_message` takes `sender_type`/`sender_id` as parameters so the gRPC layer can post `ai`/`system` messages later.
+
+**Ticket statuses and what changes them:**
+- New ticket → `open`.
+- Staff `PATCH .../status` → `open`, `escalated` or `resolved` (any current status).
+- Customer message on a `resolved` ticket → `open` (staff messages never change the status).
+- Approval created as `pending` → `awaiting_approval`. An auto-approved one leaves the ticket unchanged.
+- Approval approved or rejected → `open`, but only if the ticket is currently `awaiting_approval`.
+
+**Approval rules** (`approval_service.py`):
+- Auto-approve: a `refund` approval with `amount <= REFUND_AUTO_APPROVE_LIMIT` (env, default 5000) is created as `approved`, `auto_approved=true`, `decided_by=null`, `decided_at` set. Above the limit it is `pending`.
+- One approval per return request: checked first (409), and the unique constraint on `return_request_id` catches simultaneous creates (IntegrityError → rollback → 409). Verified: 6 parallel creates → one 201.
+- Decisions load the approval with `SELECT ... FOR UPDATE` (`approval_repository.get_by_id_for_update`, with `populate_existing`), so a second decision waits for the first commit and then sees it is no longer `pending` → 409. Verified: 8 parallel approves → exactly one 200, seven 409.
+- `reject` also checks the note in the service (BadRequestError, 400) for future gRPC callers; REST returns 422 before that.
+- `approval_service` never calls `ticket_service`; both use the repositories directly.
+
+**Demo tickets** (`docker compose exec ticket python seed.py`, fixed ids, existing ones skipped; times relative to when it runs):
+| Ticket id | Customer | Subject | Status | Assigned | Messages |
+|---|---|---|---|---|---|
+| `00000000-0000-0000-0000-000000000201` | customer1 | Question about my headphones | open | agent1 | customer (ORD-1001 headphones crackle) + agent reply |
+| `00000000-0000-0000-0000-000000000202` | customer2 | Smartwatch not working | open | – | customer (ORD-1004 smartwatch won't turn on) |
+| `00000000-0000-0000-0000-000000000203` | customer3 | Where is my order? | resolved | – | customer (ORD-1009 not shipped) + agent1 reply |
+
 **gRPC:** none yet. **Events:** none yet. **Celery tasks:** none yet.
 
 **Environment variables per service** (set in `docker-compose.yml`, values from `.env`):
-`SERVICE_NAME`, `PORT`, `ROOT_PATH` (the Nginx prefix), `DATABASE_URL` (not for realtime), `REDIS_URL`, `RABBITMQ_URL`. Identity also gets `JWT_PRIVATE_KEY_PATH`, `JWT_PUBLIC_KEY_PATH`, `ACCESS_TOKEN_EXPIRE_MINUTES`. Order also gets `JWT_PUBLIC_KEY_PATH` (and mounts only `keys/public`).
-`.env` also holds the three JWT settings above (paths are container paths), `POSTGRES_USER`, `POSTGRES_PASSWORD`, `<SERVICE>_DATABASE_URL` ×5, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`, `OPENAI_API_KEY`, `CHAT_MODEL`, `EMBEDDING_MODEL`, `REFUND_AUTO_APPROVE_LIMIT` (the last four are not passed to any service yet).
+`SERVICE_NAME`, `PORT`, `ROOT_PATH` (the Nginx prefix), `DATABASE_URL` (not for realtime), `REDIS_URL`, `RABBITMQ_URL`. Identity also gets `JWT_PRIVATE_KEY_PATH`, `JWT_PUBLIC_KEY_PATH`, `ACCESS_TOKEN_EXPIRE_MINUTES`. Order also gets `JWT_PUBLIC_KEY_PATH` (and mounts only `keys/public`). Ticket gets `JWT_PUBLIC_KEY_PATH` and `REFUND_AUTO_APPROVE_LIMIT` (mounts only `keys/public`).
+`.env` also holds the three JWT settings above (paths are container paths), `POSTGRES_USER`, `POSTGRES_PASSWORD`, `<SERVICE>_DATABASE_URL` ×5, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`, `OPENAI_API_KEY`, `CHAT_MODEL`, `EMBEDDING_MODEL` (not passed to any service yet), `REFUND_AUTO_APPROVE_LIMIT` (ticket).
 
 ## 8. Milestone status
 
 - [x] M0 Skeleton and infrastructure
 - [x] M1 Identity
 - [x] M2 Order
-- [ ] M3 Ticket
+- [x] M3 Ticket
 - [ ] M4 Knowledge
 - [ ] M5 gRPC layer
 - [ ] M6 Events and Realtime
@@ -205,6 +256,15 @@ Delivered orders have a `BlueDart` shipment (`BD-<number>`, shipped 3 days befor
 - Order items are returned sorted by product name; all order-list queries load items and shipment with `selectinload`.
 - The order seed uses the models directly (one commit per order), not repositories, because it builds whole orders with items and shipment in one go.
 - `UnauthorizedError` was added as a fifth error class (also now listed in `CLAUDE.md` section 5).
+- Ticket service follows the order pattern: repositories only `flush`, services `commit`; `auth.py`, `errors.py`, `database.py`, alembic files and the `Money` type copied from order.
+- Ticket detail and create responses are `{ticket, messages}` (two keys) instead of a flat ticket with nested messages: the service returns the ticket plus `message_repository.list_by_ticket`, and there is no ORM relationship on `Ticket`.
+- The create-ticket body field for the first message is `message`; posting a message uses `content`.
+- Customers may also use the `status` filter on `GET /tickets` (it only narrows their own tickets).
+- An admin posting a message is stored as `sender_type: agent` with the admin's id as `sender_id`.
+- `updated_at` is set with SQL `now()` (transaction time) in the ticket repository; the decision time `decided_at` is computed in the service (UTC).
+- `action_type` defaults to `refund` and is the only accepted value; amounts must have at most 2 decimals and 10 digits (fits `Numeric(10,2)`). Summary and notes are 1–1000 characters, trimmed.
+- On a decision the ticket goes back to `open` only if it is `awaiting_approval` (a ticket staff already escalated or resolved keeps that status).
+- The ticket seed builds rows with the models directly (like the order seed) so it can set fixed ids and realistic message times.
 
 ## 10. How to run
 
@@ -220,13 +280,17 @@ docker compose exec identity python seed.py      # demo users; safe to run again
 ```bash
 docker compose exec order python seed.py         # ten demo orders for the fixed demo customer ids; safe to run again
 ```
-Seed data for tickets and policies arrives with M3–M4. Order tables are created by the order container's `alembic upgrade head` on startup.
+```bash
+docker compose exec ticket python seed.py        # three demo tickets with messages; safe to run again
+```
+Seed data for policies arrives with M4. Each service's tables are created by its container's `alembic upgrade head` on startup.
 
 ## 11. Known limitations and deviations
 
 - `scripts/init_databases.sql` runs only when the Postgres volume is new; after changing it, run `docker compose down -v`.
 - Nginx resolves service hostnames once at startup. If you recreate a single service container (`docker compose up -d --build order`), run `docker compose restart nginx` if you see 502 errors.
 - Realtime has no WebSocket library yet (Uvicorn logs "No supported WebSocket library"); M6 adds one.
+- Deviation: the ticket seed script is `services/ticket/seed.py`, for the same reason as identity's and order's.
 - Deviation: the order seed script is `services/order/seed.py` for the same reason as identity's (it needs the service's models). Both are copied into the image: rebuild after editing them.
 - Deviation: the identity seed script is `services/identity/seed.py`, not in `/scripts`, because it needs the service's models, repository and password hashing (the file is copied into the image with the rest of the service folder; rebuild after editing it).
 - The order seed's dates are fixed when it first runs; after a few days the demo orders age (for example ORD-1001 will leave the electronics window). Run `docker compose down -v` and re-seed to reset.
@@ -235,3 +299,13 @@ Seed data for tickets and policies arrives with M3–M4. Order tables are create
 - Login does not hide whether an email exists through timing (an unknown email returns slightly faster than a wrong password). Acceptable for this learning project.
 - Two simultaneous registrations of the same new email can make the loser get a 500 instead of 409 (the unique index still prevents a duplicate).
 - FastAPI logs a deprecation warning about the `root_path` constructor argument (from M0); it still works. Fix later by passing `--root-path` to Uvicorn.
+- Deciding one approval moves an `awaiting_approval` ticket back to `open` even if another approval on the same ticket is still pending (rare; the remaining one still shows in `GET /approvals?status=pending`).
+- Staff can set a ticket that is `awaiting_approval` to `open`/`escalated`/`resolved` by hand; the pending approval stays pending.
+- Message ordering uses `created_at` (transaction time) with `id` as a tie-breaker; two messages in one transaction would have the same timestamp (does not happen through the API).
+
+## 12. Open items for later milestones
+
+- `return_request_id` and `amount` on an approval are supplied by the caller and are **not verified** against the Order service in M3. In M9 the Order service must verify the approval (status, return request ID, amount) with the Ticket service over gRPC before executing a refund.
+- `assigned_agent_id` is not validated against the Identity service (it is always the caller's own id from the token today).
+- `customer_email` on a ticket is a copy from the token; it is not updated if the user's email changes.
+- M10: a takeover flag on tickets (the AI must not reply when a human has taken over).

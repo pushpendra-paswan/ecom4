@@ -80,6 +80,13 @@ services:
       DATABASE_URL: ${TICKET_DATABASE_URL}
       REDIS_URL: ${REDIS_URL}
       RABBITMQ_URL: ${RABBITMQ_URL}
+      JWT_PUBLIC_KEY_PATH: ${JWT_PUBLIC_KEY_PATH}
+      REFUND_AUTO_APPROVE_LIMIT: ${REFUND_AUTO_APPROVE_LIMIT}
+    # run the migration first, then start the API ($$ stops Compose from replacing PORT itself)
+    command: ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port $${PORT}"]
+    # only the public key folder: the ticket service must never see the private key
+    volumes:
+      - ./keys/public:/keys/public:ro
     depends_on:
       postgres:
         condition: service_healthy
