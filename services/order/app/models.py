@@ -33,6 +33,10 @@ class OrderItem(Base):
     quantity: Mapped[int]
     unit_price: Mapped[Decimal] = mapped_column(Numeric(10, 2))
 
+    # M9: the item's return request, if one exists (at most one: order_item_id is unique there). Read-only here;
+    # return requests are created through return_repository.
+    return_request: Mapped["ReturnRequest | None"] = relationship(viewonly=True)
+
 
 class Shipment(Base):
     __tablename__ = "shipments"

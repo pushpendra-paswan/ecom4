@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0border.proto\x12\x05order\"(\n\x11ListOrdersRequest\x12\x13\n\x0b\x63ustomer_id\x18\x01 \x01(\t\"2\n\x12ListOrdersResponse\x12\x1c\n\x06orders\x18\x01 \x03(\x0b\x32\x0c.order.Order\"<\n\x0fGetOrderRequest\x12\x14\n\x0corder_number\x18\x01 \x01(\t\x12\x13\n\x0b\x63ustomer_id\x18\x02 \x01(\t\"a\n\x1d\x43heckReturnEligibilityRequest\x12\x14\n\x0corder_number\x18\x01 \x01(\t\x12\x15\n\rorder_item_id\x18\x02 \x01(\t\x12\x13\n\x0b\x63ustomer_id\x18\x03 \x01(\t\"n\n\x1a\x43reateReturnRequestRequest\x12\x14\n\x0corder_number\x18\x01 \x01(\t\x12\x15\n\rorder_item_id\x18\x02 \x01(\t\x12\x0e\n\x06reason\x18\x03 \x01(\t\x12\x13\n\x0b\x63ustomer_id\x18\x04 \x01(\t\"e\n\tOrderItem\x12\n\n\x02id\x18\x01 \x01(\t\x12\x14\n\x0cproduct_name\x18\x02 \x01(\t\x12\x10\n\x08\x63\x61tegory\x18\x03 \x01(\t\x12\x10\n\x08quantity\x18\x04 \x01(\x05\x12\x12\n\nunit_price\x18\x05 \x01(\t\"\xa0\x01\n\x08Shipment\x12\x0f\n\x07\x63\x61rrier\x18\x01 \x01(\t\x12\x17\n\x0ftracking_number\x18\x02 \x01(\t\x12\x0e\n\x06status\x18\x03 \x01(\t\x12\x12\n\nshipped_on\x18\x04 \x01(\t\x12\x1a\n\x12\x65stimated_delivery\x18\x05 \x01(\t\x12\x19\n\x0c\x64\x65livered_on\x18\x06 \x01(\tH\x00\x88\x01\x01\x42\x0f\n\r_delivered_on\"\xb0\x01\n\x05Order\x12\x14\n\x0corder_number\x18\x01 \x01(\t\x12\x13\n\x0b\x63ustomer_id\x18\x02 \x01(\t\x12\x0e\n\x06status\x18\x03 \x01(\t\x12\x14\n\x0ctotal_amount\x18\x04 \x01(\t\x12\x12\n\nordered_at\x18\x05 \x01(\t\x12\x1f\n\x05items\x18\x06 \x03(\x0b\x32\x10.order.OrderItem\x12!\n\x08shipment\x18\x07 \x01(\x0b\x32\x0f.order.Shipment\"\xbd\x01\n\x11ReturnEligibility\x12\x10\n\x08\x65ligible\x18\x01 \x01(\x08\x12\x13\n\x0breason_code\x18\x02 \x01(\t\x12\x0e\n\x06reason\x18\x03 \x01(\t\x12\x1a\n\rrefund_amount\x18\x04 \x01(\tH\x00\x88\x01\x01\x12\x13\n\x0bwindow_days\x18\x05 \x01(\x05\x12\x1b\n\x0e\x64\x61ys_remaining\x18\x06 \x01(\x05H\x01\x88\x01\x01\x42\x10\n\x0e_refund_amountB\x11\n\x0f_days_remaining\"\x93\x01\n\rReturnRequest\x12\n\n\x02id\x18\x01 \x01(\t\x12\x14\n\x0corder_number\x18\x02 \x01(\t\x12\x15\n\rorder_item_id\x18\x03 \x01(\t\x12\x0e\n\x06status\x18\x04 \x01(\t\x12\x15\n\rrefund_amount\x18\x05 \x01(\t\x12\x0e\n\x06reason\x18\x06 \x01(\t\x12\x12\n\ncreated_at\x18\x07 \x01(\t2\xad\x02\n\x0cOrderService\x12\x41\n\nListOrders\x12\x18.order.ListOrdersRequest\x1a\x19.order.ListOrdersResponse\x12\x30\n\x08GetOrder\x12\x16.order.GetOrderRequest\x1a\x0c.order.Order\x12X\n\x16\x43heckReturnEligibility\x12$.order.CheckReturnEligibilityRequest\x1a\x18.order.ReturnEligibility\x12N\n\x13\x43reateReturnRequest\x12!.order.CreateReturnRequestRequest\x1a\x14.order.ReturnRequestb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0border.proto\x12\x05order\"(\n\x11ListOrdersRequest\x12\x13\n\x0b\x63ustomer_id\x18\x01 \x01(\t\"2\n\x12ListOrdersResponse\x12\x1c\n\x06orders\x18\x01 \x03(\x0b\x32\x0c.order.Order\"<\n\x0fGetOrderRequest\x12\x14\n\x0corder_number\x18\x01 \x01(\t\x12\x13\n\x0b\x63ustomer_id\x18\x02 \x01(\t\"a\n\x1d\x43heckReturnEligibilityRequest\x12\x14\n\x0corder_number\x18\x01 \x01(\t\x12\x15\n\rorder_item_id\x18\x02 \x01(\t\x12\x13\n\x0b\x63ustomer_id\x18\x03 \x01(\t\"n\n\x1a\x43reateReturnRequestRequest\x12\x14\n\x0corder_number\x18\x01 \x01(\t\x12\x15\n\rorder_item_id\x18\x02 \x01(\t\x12\x0e\n\x06reason\x18\x03 \x01(\t\x12\x13\n\x0b\x63ustomer_id\x18\x04 \x01(\t\"\xef\x01\n\tOrderItem\x12\n\n\x02id\x18\x01 \x01(\t\x12\x14\n\x0cproduct_name\x18\x02 \x01(\t\x12\x10\n\x08\x63\x61tegory\x18\x03 \x01(\t\x12\x10\n\x08quantity\x18\x04 \x01(\x05\x12\x12\n\nunit_price\x18\x05 \x01(\t\x12=\n\x0ereturn_request\x18\x06 \x01(\x0b\x32%.order.OrderItem.ReturnRequestSummary\x1aI\n\x14ReturnRequestSummary\x12\n\n\x02id\x18\x01 \x01(\t\x12\x0e\n\x06status\x18\x02 \x01(\t\x12\x15\n\rrefund_amount\x18\x03 \x01(\t\"\xa0\x01\n\x08Shipment\x12\x0f\n\x07\x63\x61rrier\x18\x01 \x01(\t\x12\x17\n\x0ftracking_number\x18\x02 \x01(\t\x12\x0e\n\x06status\x18\x03 \x01(\t\x12\x12\n\nshipped_on\x18\x04 \x01(\t\x12\x1a\n\x12\x65stimated_delivery\x18\x05 \x01(\t\x12\x19\n\x0c\x64\x65livered_on\x18\x06 \x01(\tH\x00\x88\x01\x01\x42\x0f\n\r_delivered_on\"\xb0\x01\n\x05Order\x12\x14\n\x0corder_number\x18\x01 \x01(\t\x12\x13\n\x0b\x63ustomer_id\x18\x02 \x01(\t\x12\x0e\n\x06status\x18\x03 \x01(\t\x12\x14\n\x0ctotal_amount\x18\x04 \x01(\t\x12\x12\n\nordered_at\x18\x05 \x01(\t\x12\x1f\n\x05items\x18\x06 \x03(\x0b\x32\x10.order.OrderItem\x12!\n\x08shipment\x18\x07 \x01(\x0b\x32\x0f.order.Shipment\"\xbd\x01\n\x11ReturnEligibility\x12\x10\n\x08\x65ligible\x18\x01 \x01(\x08\x12\x13\n\x0breason_code\x18\x02 \x01(\t\x12\x0e\n\x06reason\x18\x03 \x01(\t\x12\x1a\n\rrefund_amount\x18\x04 \x01(\tH\x00\x88\x01\x01\x12\x13\n\x0bwindow_days\x18\x05 \x01(\x05\x12\x1b\n\x0e\x64\x61ys_remaining\x18\x06 \x01(\x05H\x01\x88\x01\x01\x42\x10\n\x0e_refund_amountB\x11\n\x0f_days_remaining\"\x93\x01\n\rReturnRequest\x12\n\n\x02id\x18\x01 \x01(\t\x12\x14\n\x0corder_number\x18\x02 \x01(\t\x12\x15\n\rorder_item_id\x18\x03 \x01(\t\x12\x0e\n\x06status\x18\x04 \x01(\t\x12\x15\n\rrefund_amount\x18\x05 \x01(\t\x12\x0e\n\x06reason\x18\x06 \x01(\t\x12\x12\n\ncreated_at\x18\x07 \x01(\t2\xad\x02\n\x0cOrderService\x12\x41\n\nListOrders\x12\x18.order.ListOrdersRequest\x1a\x19.order.ListOrdersResponse\x12\x30\n\x08GetOrder\x12\x16.order.GetOrderRequest\x1a\x0c.order.Order\x12X\n\x16\x43heckReturnEligibility\x12$.order.CheckReturnEligibilityRequest\x1a\x18.order.ReturnEligibility\x12N\n\x13\x43reateReturnRequest\x12!.order.CreateReturnRequestRequest\x1a\x14.order.ReturnRequestb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -41,16 +41,18 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_CHECKRETURNELIGIBILITYREQUEST']._serialized_end=275
   _globals['_CREATERETURNREQUESTREQUEST']._serialized_start=277
   _globals['_CREATERETURNREQUESTREQUEST']._serialized_end=387
-  _globals['_ORDERITEM']._serialized_start=389
-  _globals['_ORDERITEM']._serialized_end=490
-  _globals['_SHIPMENT']._serialized_start=493
-  _globals['_SHIPMENT']._serialized_end=653
-  _globals['_ORDER']._serialized_start=656
-  _globals['_ORDER']._serialized_end=832
-  _globals['_RETURNELIGIBILITY']._serialized_start=835
-  _globals['_RETURNELIGIBILITY']._serialized_end=1024
-  _globals['_RETURNREQUEST']._serialized_start=1027
-  _globals['_RETURNREQUEST']._serialized_end=1174
-  _globals['_ORDERSERVICE']._serialized_start=1177
-  _globals['_ORDERSERVICE']._serialized_end=1478
+  _globals['_ORDERITEM']._serialized_start=390
+  _globals['_ORDERITEM']._serialized_end=629
+  _globals['_ORDERITEM_RETURNREQUESTSUMMARY']._serialized_start=556
+  _globals['_ORDERITEM_RETURNREQUESTSUMMARY']._serialized_end=629
+  _globals['_SHIPMENT']._serialized_start=632
+  _globals['_SHIPMENT']._serialized_end=792
+  _globals['_ORDER']._serialized_start=795
+  _globals['_ORDER']._serialized_end=971
+  _globals['_RETURNELIGIBILITY']._serialized_start=974
+  _globals['_RETURNELIGIBILITY']._serialized_end=1163
+  _globals['_RETURNREQUEST']._serialized_start=1166
+  _globals['_RETURNREQUEST']._serialized_end=1313
+  _globals['_ORDERSERVICE']._serialized_start=1316
+  _globals['_ORDERSERVICE']._serialized_end=1617
 # @@protoc_insertion_point(module_scope)

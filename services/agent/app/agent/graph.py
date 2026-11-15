@@ -1,25 +1,39 @@
 # The AI agent: a LangGraph StateGraph, checkpointed in Postgres with thread_id = ticket_id.
 #
-#   START -> load_context -> agent -> (tool calls?) -> tools -> agent -> ... -> post_reply -> END
+#   START -> load_context -> agent -> (tool calls?) -> tools -> agent -> ... -> post_reply
+#   post_reply -> END                                                    (no pending refund approval)
+#   post_reply -> wait_for_approval -> (paused) ... -> announce_decision -> END   (M9: a refund waits for a human)
 #
-# run_agent(ticket_id) is the one entry point (called by run_service). The node functions below are graph entry points.
+# Human in the loop (M9): when request_refund returned "pending", the run posts its reply and then pauses in
+# wait_for_approval with interrupt(). The paused state is saved by the Postgres checkpointer, so it survives restarts.
+# When a human decides, resume_agent() resumes the thread with Command(resume=...) and announce_decision posts a
+# fixed outcome message (no model call).
+#
+# Entry points (called by run_service): run_agent(ticket_id) and resume_agent(ticket_id, approval_id).
+# The node functions below are graph entry points.
+import logging
+from decimal import Decimal
 from typing import Annotated, TypedDict
 
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveMessage, SystemMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
+from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.prebuilt.tool_node import ToolInvocationError
+from langgraph.types import Command, interrupt
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 from app.agent import clients
-from app.agent.prompts import SYSTEM_PROMPT
+from app.agent.prompts import REFUND_APPROVED_MESSAGE, REFUND_REJECTED_MESSAGE, SYSTEM_PROMPT
 from app.agent.tools import TOOLS
 from app.config import settings
 from app.errors import ToolCallError
+
+logger = logging.getLogger(__name__)
 
 # Posted when the model returns an empty answer, after the final failed retry, and when the step limit is hit
 FALLBACK_MESSAGE = "Sorry, I'm having trouble answering right now. A support agent will follow up with you."
@@ -43,6 +57,10 @@ class AgentState(TypedDict):
     tool_call_count: int
     # The reason the model gave when it called escalate_to_human in this run (None if it did not)
     escalation_reason: str | None
+    # M9: the approval this thread is paused for (a request_refund in this run returned "pending"); None otherwise
+    pending_approval_id: str | None
+    # M9: the value the thread was resumed with: {"approval_id": ...}
+    approval_decision: dict | None
 
 
 # Built on first use, once per process (see run_agent). Never at import time: Celery imports this module
@@ -81,6 +99,8 @@ def load_context(state: AgentState) -> dict:
         "reply_message_id": None,
         "tool_call_count": 0,
         "escalation_reason": None,
+        "pending_approval_id": None,
+        "approval_decision": None,
     }
 
 
@@ -122,11 +142,69 @@ def post_reply(state: AgentState) -> dict:
             for tool_call in state_message.tool_calls:
                 if tool_call["name"] == "escalate_to_human":
                     escalation_reason = str(tool_call["args"].get("reason", "")).strip() or None
-    return {"reply_message_id": message["id"], "escalation_reason": escalation_reason}
+
+    # Step 4 (M9): did a request_refund in this run create a PENDING approval? Its ToolMessage carries the approval
+    # id in the artifact (never shown to the model). An error result has no artifact.
+    pending_approval_id = None
+    for state_message in state["messages"]:
+        if isinstance(state_message, ToolMessage) and state_message.name == "request_refund":
+            artifact = state_message.artifact
+            if isinstance(artifact, dict) and artifact.get("status") == "pending":
+                pending_approval_id = artifact["approval_id"]
+    return {
+        "reply_message_id": message["id"],
+        "escalation_reason": escalation_reason,
+        "pending_approval_id": pending_approval_id,
+    }
 
 
-# Runs the graph for one ticket and returns what the run service records (including the escalation reason)
-def run_agent(ticket_id: str) -> dict:
+# Edge after post_reply: pause for a pending refund approval, otherwise the run is over
+def route_after_reply(state: AgentState) -> str:
+    if state["pending_approval_id"] is not None:
+        return "wait_for_approval"
+    return END
+
+
+# Node "wait_for_approval": pause the thread until a human decides. interrupt() saves the state and stops the run;
+# on resume LangGraph runs this node again from the top and interrupt() returns the resume value instead.
+def wait_for_approval(state: AgentState) -> dict:
+    decision = interrupt({"approval_id": state["pending_approval_id"]})
+    return {"approval_decision": decision}
+
+
+# Node "announce_decision": post the outcome of the refund as a fixed message (no model call, so it is always exact)
+def announce_decision(state: AgentState) -> dict:
+    # Step 1: only the approval this thread waits for may be announced
+    resumed_approval_id = (state["approval_decision"] or {}).get("approval_id")
+    if resumed_approval_id != state["pending_approval_id"]:
+        logger.warning(
+            "Ticket %s was resumed for approval %s but waits for %s; nothing posted",
+            state["ticket_id"],
+            resumed_approval_id,
+            state["pending_approval_id"],
+        )
+        return {"reply_message_id": None}
+
+    # Step 2: read the decision from the Ticket service (the source of truth)
+    approval = clients.get_approval(state["pending_approval_id"])
+
+    # Step 3: fill in the template (amount like 18,000.00; the note's own final full stop is dropped, the template
+    # adds one)
+    if approval["status"] == "approved":
+        amount = f"{Decimal(approval['amount']):,.2f}"
+        content = REFUND_APPROVED_MESSAGE.format(amount=amount, summary=approval["summary"])
+    else:
+        decision_note = (approval["decision_note"] or "No reason was given").strip().rstrip(".")
+        content = REFUND_REJECTED_MESSAGE.format(summary=approval["summary"], decision_note=decision_note)
+
+    # Step 4: post it as an ai message and stop waiting
+    message = clients.post_message(state["ticket_id"], "ai", content[:MAX_REPLY_LENGTH])
+    return {"reply_message_id": message["id"], "pending_approval_id": None}
+
+
+# Builds the model, the checkpointer and the compiled graph on the first call in each process, then returns the
+# graph. Shared by the two entry points below.
+def get_compiled_graph() -> CompiledStateGraph:
     global model_with_tools, compiled_graph
 
     if compiled_graph is None:
@@ -160,22 +238,79 @@ def run_agent(ticket_id: str) -> dict:
         builder.add_node("agent", call_model)
         builder.add_node("tools", ToolNode(TOOLS, handle_tool_errors=tool_error_message))
         builder.add_node("post_reply", post_reply)
+        builder.add_node("wait_for_approval", wait_for_approval)
+        builder.add_node("announce_decision", announce_decision)
         builder.add_edge(START, "load_context")
         builder.add_edge("load_context", "agent")
         builder.add_conditional_edges("agent", tools_condition, {"tools": "tools", END: "post_reply"})
         builder.add_edge("tools", "agent")
-        builder.add_edge("post_reply", END)
+        builder.add_conditional_edges(
+            "post_reply", route_after_reply, {"wait_for_approval": "wait_for_approval", END: END}
+        )
+        builder.add_edge("wait_for_approval", "announce_decision")
+        builder.add_edge("announce_decision", END)
         compiled_graph = builder.compile(checkpointer=checkpointer)
 
-    # Step 5: run it. The ticket is the conversation thread; the recursion limit is the hard step limit
+    return compiled_graph
+
+
+# Runs the graph for one customer message and returns what the run service records. paused_for_approval_id is set
+# when the run ended paused in wait_for_approval (a refund waits for a human).
+def run_agent(ticket_id: str) -> dict:
+    # Step 1: the compiled graph (built on the first run in this process)
+    graph = get_compiled_graph()
+
+    # Step 2: run it. The ticket is the conversation thread; the recursion limit is the hard step limit
     # (it raises GraphRecursionError, which run_service handles).
     config = {"configurable": {"thread_id": ticket_id}, "recursion_limit": settings.agent_recursion_limit}
-    final_state = compiled_graph.invoke({"ticket_id": ticket_id}, config)
+    final_state = graph.invoke({"ticket_id": ticket_id}, config)
 
-    # Step 6: return what the run service records
+    # Step 3: a paused run returns its state plus "__interrupt__" (the interrupt values)
+    paused_for_approval_id = None
+    if "__interrupt__" in final_state:
+        paused_for_approval_id = final_state["pending_approval_id"]
+
+    # Step 4: return what the run service records
     return {
         "context_until": final_state["context_until"],
         "reply_message_id": final_state["reply_message_id"],
         "tool_call_count": final_state["tool_call_count"],
         "escalation_reason": final_state["escalation_reason"],
+        "paused_for_approval_id": paused_for_approval_id,
     }
+
+
+# Resumes a thread that is paused for this approval and returns {"resumed": True, "reply_message_id": ...}, or
+# {"resumed": False, "reply_message_id": None} when the thread is not waiting for it (an approval created over REST,
+# a duplicate event, or an approval the thread no longer waits for).
+def resume_agent(ticket_id: str, approval_id: str) -> dict:
+    # Step 1: the compiled graph and the thread's saved state
+    graph = get_compiled_graph()
+    config = {"configurable": {"thread_id": ticket_id}, "recursion_limit": settings.agent_recursion_limit}
+    snapshot = graph.get_state(config)
+
+    # Step 2: is the thread paused in wait_for_approval for THIS approval?
+    waiting = False
+    for pending_interrupt in snapshot.interrupts:
+        if isinstance(pending_interrupt.value, dict) and pending_interrupt.value.get("approval_id") == approval_id:
+            waiting = True
+
+    # Step 3: a retry after announce_decision failed (for example the Ticket service was down): the interrupt is
+    # already answered and announce_decision is the next node, so continue from the saved state with no new input
+    retrying_announcement = (
+        "announce_decision" in snapshot.next and snapshot.values.get("pending_approval_id") == approval_id
+    )
+
+    # Step 4: resume with the approval id (or continue the failed announcement); otherwise there is nothing to do
+    if waiting:
+        final_state = graph.invoke(Command(resume={"approval_id": approval_id}), config)
+    elif retrying_announcement:
+        final_state = graph.invoke(None, config)
+    else:
+        return {"resumed": False, "reply_message_id": None}
+
+    # Step 5: the outcome message posted by announce_decision
+    logger.info(
+        "Ticket %s resumed for approval %s, outcome message %s", ticket_id, approval_id, final_state["reply_message_id"]
+    )
+    return {"resumed": final_state["reply_message_id"] is not None, "reply_message_id": final_state["reply_message_id"]}

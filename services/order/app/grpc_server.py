@@ -49,17 +49,25 @@ class OrderServicer(order_pb2_grpc.OrderServiceServicer):
             # Step 2: call the service
             orders = order_service.list_orders(db, customer_id)
 
-            # Step 3: convert each order (with its items and shipment) to proto
+            # Step 3: convert each order (with its items, their return requests, and the shipment) to proto
             order_messages = []
             for order in orders:
                 items = []
                 for item in order.items:
+                    return_request = None
+                    if item.return_request is not None:
+                        return_request = order_pb2.OrderItem.ReturnRequestSummary(
+                            id=str(item.return_request.id),
+                            status=item.return_request.status,
+                            refund_amount=f"{item.return_request.refund_amount:.2f}",
+                        )
                     items.append(order_pb2.OrderItem(
                         id=str(item.id),
                         product_name=item.product_name,
                         category=item.category,
                         quantity=item.quantity,
                         unit_price=f"{item.unit_price:.2f}",
+                        return_request=return_request,
                     ))
                 shipment = None
                 if order.shipment is not None:
@@ -95,15 +103,24 @@ class OrderServicer(order_pb2_grpc.OrderServiceServicer):
             # Step 2: call the service (another customer's order is NOT_FOUND)
             order = order_service.get_order(db, request.order_number, customer_id)
 
-            # Step 3: convert the items and the shipment (absent for placed and cancelled orders) to proto
+            # Step 3: convert the items (each with its return request, if any) and the shipment (absent for placed
+            # and cancelled orders) to proto
             items = []
             for item in order.items:
+                return_request = None
+                if item.return_request is not None:
+                    return_request = order_pb2.OrderItem.ReturnRequestSummary(
+                        id=str(item.return_request.id),
+                        status=item.return_request.status,
+                        refund_amount=f"{item.return_request.refund_amount:.2f}",
+                    )
                 items.append(order_pb2.OrderItem(
                     id=str(item.id),
                     product_name=item.product_name,
                     category=item.category,
                     quantity=item.quantity,
                     unit_price=f"{item.unit_price:.2f}",
+                    return_request=return_request,
                 ))
             shipment = None
             if order.shipment is not None:

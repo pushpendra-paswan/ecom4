@@ -8,6 +8,7 @@ service TicketService {
   rpc PostMessage(PostMessageRequest) returns (Message);
   rpc CreateApproval(CreateApprovalRequest) returns (Approval);
   rpc EscalateTicket(EscalateTicketRequest) returns (Ticket);  // the returned Ticket has no messages
+  rpc GetApproval(GetApprovalRequest) returns (Approval);       // M9: the Order service verifies an approval before refunding
 }
 
 message GetTicketRequest {
@@ -32,6 +33,10 @@ message CreateApprovalRequest {
 message EscalateTicketRequest {
   string ticket_id = 1;
   string reason = 2;
+}
+
+message GetApprovalRequest {
+  string approval_id = 1;
 }
 
 message Message {
@@ -65,4 +70,7 @@ message Approval {
   string status = 7;  // pending | approved | rejected
   bool auto_approved = 8;
   string created_at = 9;
+  optional string decision_note = 10;  // absent until a human decides (a rejection always has one)
+  optional string decided_by = 11;     // the staff user id; absent while pending and for auto-approvals
+  optional string decided_at = 12;     // absent while pending; also set for auto-approvals
 }

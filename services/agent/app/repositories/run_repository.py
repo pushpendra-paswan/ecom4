@@ -7,9 +7,23 @@ from sqlalchemy.orm import Session
 from app.models import AgentRun
 
 
-# Repositories only flush (send the SQL); the service decides when to commit
-def create(db: Session, ticket_id: uuid.UUID, trigger_message_id: uuid.UUID) -> AgentRun:
-    run = AgentRun(ticket_id=ticket_id, trigger_message_id=trigger_message_id, status="started", tool_call_count=0)
+# Repositories only flush (send the SQL); the service decides when to commit.
+# A "message" run has a trigger message, an "approval" run (M9) a trigger approval.
+def create(
+    db: Session,
+    ticket_id: uuid.UUID,
+    run_type: str,
+    trigger_message_id: uuid.UUID | None,
+    trigger_approval_id: uuid.UUID | None,
+) -> AgentRun:
+    run = AgentRun(
+        ticket_id=ticket_id,
+        run_type=run_type,
+        trigger_message_id=trigger_message_id,
+        trigger_approval_id=trigger_approval_id,
+        status="started",
+        tool_call_count=0,
+    )
     db.add(run)
     db.flush()
     return run
@@ -17,6 +31,10 @@ def create(db: Session, ticket_id: uuid.UUID, trigger_message_id: uuid.UUID) -> 
 
 def get_by_trigger_message(db: Session, trigger_message_id: uuid.UUID) -> AgentRun | None:
     return db.scalar(select(AgentRun).where(AgentRun.trigger_message_id == trigger_message_id))
+
+
+def get_by_trigger_approval(db: Session, trigger_approval_id: uuid.UUID) -> AgentRun | None:
+    return db.scalar(select(AgentRun).where(AgentRun.trigger_approval_id == trigger_approval_id))
 
 
 # The completed run on this ticket that read the furthest into the conversation
@@ -39,6 +57,7 @@ def update(
     reply_message_id: uuid.UUID | None,
     tool_call_count: int,
     escalation_reason: str | None,
+    paused_for_approval_id: uuid.UUID | None,
     finished_at: datetime | None,
 ) -> AgentRun:
     run.status = status
@@ -47,6 +66,7 @@ def update(
     run.reply_message_id = reply_message_id
     run.tool_call_count = tool_call_count
     run.escalation_reason = escalation_reason
+    run.paused_for_approval_id = paused_for_approval_id
     run.finished_at = finished_at
     db.flush()
     return run

@@ -17,6 +17,15 @@ Money = Annotated[Decimal, PlainSerializer(money_to_number, return_type=float)]
 Reason = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
 
 
+# M9: the item's return request (same fields as the gRPC OrderItem.return_request)
+class ItemReturnRequestResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    status: str
+    refund_amount: Money
+
+
 class OrderItemResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -25,6 +34,7 @@ class OrderItemResponse(BaseModel):
     category: str
     quantity: int
     unit_price: Money
+    return_request: ItemReturnRequestResponse | None
 
 
 class ShipmentResponse(BaseModel):

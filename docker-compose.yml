@@ -85,7 +85,8 @@ services:
       GRPC_PORT: 50053
       # gRPC service tokens: shared HS256 secret (Compose stops if it is missing) and the callers allowed in
       SERVICE_TOKEN_SECRET: ${SERVICE_TOKEN_SECRET:?set SERVICE_TOKEN_SECRET in .env}
-      GRPC_ALLOWED_CALLERS: agent
+      # M9: the order service calls GetApproval to verify approvals before refunding
+      GRPC_ALLOWED_CALLERS: agent,order
     # gRPC for service-to-service calls; published on localhost ONLY so the host-side client script
     # (scripts/grpc_client_check.py) can reach it. Development-only: other containers use ticket:50053.
     ports:
@@ -117,6 +118,8 @@ services:
       # gRPC service tokens: shared HS256 secret (Compose stops if it is missing) and the callers allowed in
       SERVICE_TOKEN_SECRET: ${SERVICE_TOKEN_SECRET:?set SERVICE_TOKEN_SECRET in .env}
       GRPC_ALLOWED_CALLERS: agent
+      # M9: the Ticket gRPC server (the API itself does not call it; same config.py as the worker)
+      TICKET_GRPC_ADDRESS: ticket:50053
     # gRPC for service-to-service calls; published on localhost ONLY so the host-side client script
     # (scripts/grpc_client_check.py) can reach it. Development-only: other containers use order:50051.
     ports:
@@ -126,6 +129,56 @@ services:
     # only the public key folder: the order service must never see the private key
     volumes:
       - ./keys/public:/keys/public:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  # Celery worker for the order service (M9): same image, different command. It verifies approved refund approvals
+  # with the Ticket service over gRPC (token sub=order) and executes the simulated refund.
+  order-worker:
+    build: ./services/order
+    environment:
+      SERVICE_NAME: order-worker
+      DATABASE_URL: ${ORDER_DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      RABBITMQ_URL: ${RABBITMQ_URL}
+      # required by the shared config.py; the worker never checks user tokens, so the key folder is not mounted
+      JWT_PUBLIC_KEY_PATH: ${JWT_PUBLIC_KEY_PATH}
+      # also only required by config.py: the worker never starts the gRPC server
+      GRPC_PORT: 50051
+      GRPC_ALLOWED_CALLERS: none
+      # the worker IS a gRPC caller (of Ticket), so it gets the real shared secret
+      SERVICE_TOKEN_SECRET: ${SERVICE_TOKEN_SECRET:?set SERVICE_TOKEN_SECRET in .env}
+      TICKET_GRPC_ADDRESS: ticket:50053
+    # its own Celery queue on the shared RabbitMQ
+    command: ["celery", "-A", "app.celery_app", "worker", "-Q", "order", "--loglevel=info"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  # Event consumer for the order service (M9): same image; turns approval.decided (approved refunds) into Celery tasks
+  order-consumer:
+    build: ./services/order
+    environment:
+      SERVICE_NAME: order-consumer
+      RABBITMQ_URL: ${RABBITMQ_URL}
+      # only required by the shared config.py: the consumer never uses a database, tokens or gRPC
+      DATABASE_URL: not-used-by-the-consumer
+      REDIS_URL: not-used-by-the-consumer
+      JWT_PUBLIC_KEY_PATH: not-used-by-the-consumer
+      GRPC_PORT: 50051
+      GRPC_ALLOWED_CALLERS: none
+      SERVICE_TOKEN_SECRET: not-used-by-the-consumer
+      TICKET_GRPC_ADDRESS: ticket:50053
+    command: ["python", "-m", "app.consumer"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -225,7 +278,8 @@ services:
       rabbitmq:
         condition: service_healthy
 
-  # Celery worker for the agent: same image, runs the LangGraph agent (task run_agent_for_message, queue "agent")
+  # Celery worker for the agent: same image, runs the LangGraph agent (tasks run_agent_for_message and, from M9,
+  # resume_after_approval; queue "agent")
   agent-worker:
     build: ./services/agent
     environment:
@@ -252,7 +306,8 @@ services:
       rabbitmq:
         condition: service_healthy
 
-  # Event consumer for the agent: same image; turns ticket.message_created (customer messages) into Celery tasks
+  # Event consumer for the agent: same image; turns ticket.message_created (customer messages) and, from M9,
+  # approval.decided (human decisions) into Celery tasks
   agent-consumer:
     build: ./services/agent
     environment:

@@ -44,7 +44,12 @@ def raise_tool_error(error: grpc.RpcError) -> None:
     if error.code() == grpc.StatusCode.NOT_FOUND and error.details() == "Order not found":
         raise ToolCallError("No order with that number was found for this customer.") from error
 
-    # Step 2: the other business errors keep the server's own message
+    # Step 2: the Ticket service's duplicate-approval message talks about "return requests"; say it in the
+    # model's terms (M9: request_refund for an item that already has a refund request)
+    if error.code() == grpc.StatusCode.ALREADY_EXISTS and error.details() == "An approval already exists for this return request":
+        raise ToolCallError("A refund has already been requested for this item.") from error
+
+    # Step 3: the other business errors keep the server's own message
     if error.code() in TOOL_ERROR_CODES:
         raise ToolCallError(error.details()) from error
 
@@ -137,6 +142,79 @@ def escalate_ticket(ticket_id: str, reason: str) -> dict:
     return {"id": ticket.id, "status": ticket.status}
 
 
+# M9: creates an approval request in the Ticket service. Refunds at or below the auto-approve limit come back
+# "approved" (decided by the Ticket service's policy); larger ones "pending" (the ticket becomes awaiting_approval).
+# A second approval for the same return request is ALREADY_EXISTS.
+def create_approval(ticket_id: str, action_type: str, return_request_id: str, amount: str, summary: str) -> dict:
+    global ticket_stub
+
+    # Step 1: open the channel once per process
+    if ticket_stub is None:
+        ticket_stub = ticket_pb2_grpc.TicketServiceStub(grpc.insecure_channel(settings.ticket_grpc_address))
+
+    # Step 2: call the Ticket service
+    try:
+        approval = ticket_stub.CreateApproval(
+            ticket_pb2.CreateApprovalRequest(
+                ticket_id=ticket_id,
+                action_type=action_type,
+                return_request_id=return_request_id,
+                amount=amount,
+                summary=summary,
+            ),
+            timeout=DEFAULT_TIMEOUT_SECONDS,
+            metadata=service_token_metadata(),
+        )
+    except grpc.RpcError as error:
+        raise_tool_error(error)
+        raise
+
+    # Step 3: convert to plain Python
+    return {
+        "id": approval.id,
+        "ticket_id": approval.ticket_id,
+        "return_request_id": approval.return_request_id,
+        "amount": approval.amount,
+        "summary": approval.summary,
+        "status": approval.status,
+        "auto_approved": approval.auto_approved,
+    }
+
+
+# M9: one approval with its decision (decision_note, decided_by and decided_at are None while they are empty)
+def get_approval(approval_id: str) -> dict:
+    global ticket_stub
+
+    # Step 1: open the channel once per process
+    if ticket_stub is None:
+        ticket_stub = ticket_pb2_grpc.TicketServiceStub(grpc.insecure_channel(settings.ticket_grpc_address))
+
+    # Step 2: call the Ticket service
+    try:
+        approval = ticket_stub.GetApproval(
+            ticket_pb2.GetApprovalRequest(approval_id=approval_id),
+            timeout=DEFAULT_TIMEOUT_SECONDS,
+            metadata=service_token_metadata(),
+        )
+    except grpc.RpcError as error:
+        raise_tool_error(error)
+        raise
+
+    # Step 3: convert to plain Python
+    return {
+        "id": approval.id,
+        "ticket_id": approval.ticket_id,
+        "return_request_id": approval.return_request_id,
+        "amount": approval.amount,
+        "summary": approval.summary,
+        "status": approval.status,
+        "auto_approved": approval.auto_approved,
+        "decision_note": approval.decision_note if approval.HasField("decision_note") else None,
+        "decided_by": approval.decided_by if approval.HasField("decided_by") else None,
+        "decided_at": approval.decided_at if approval.HasField("decided_at") else None,
+    }
+
+
 # Semantic search over the policy documents, best match first
 def search_knowledge(query: str, top_k: int) -> list[dict]:
     global knowledge_stub
@@ -221,15 +299,23 @@ def get_order(order_number: str, customer_id: str) -> dict:
         raise_tool_error(error)
         raise
 
-    # Step 3: convert the items
+    # Step 3: convert the items, each with its return request (None if the item has none, M9)
     items = []
     for item in order.items:
+        return_request = None
+        if item.HasField("return_request"):
+            return_request = {
+                "id": item.return_request.id,
+                "status": item.return_request.status,
+                "refund_amount": item.return_request.refund_amount,
+            }
         items.append({
             "id": item.id,
             "product_name": item.product_name,
             "category": item.category,
             "quantity": item.quantity,
             "unit_price": item.unit_price,
+            "return_request": return_request,
         })
 
     # Step 4: convert the shipment, if there is one

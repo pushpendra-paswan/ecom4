@@ -65,12 +65,28 @@ a return when the customer clearly asks, and hand the ticket to a human (`escala
 ticket's customer, injected by code; the model never chooses it.
 
 The demo orders' dates are fixed when the order seed first runs, so return windows expire as days pass. Refresh them
-(this deletes and recreates only the ten demo orders, with their shipments, return requests and refunds; item ids change):
+(this deletes and recreates only the eleven demo orders, with their shipments, return requests and refunds; item ids change):
 
 ```bash
 docker compose exec order python seed.py --reset
 python scripts/check_agent_orders.py    # on the host (standard library only): 10 order scenarios with PASS/FAIL
 ```
+
+## Approval and refund flow (M9)
+
+The AI can **request** a refund for a returned item (it never executes one and never chooses the amount).
+Refunds of ₹5,000 or less are approved by policy straight away; larger ones wait for a support agent, and the AI's
+conversation pauses until then. Every approved refund is executed by `order-worker` only after it has verified the
+approval with the Ticket service over gRPC (status, return request and exact amount).
+
+```bash
+docker compose logs -f order-worker order-consumer agent-worker   # refunds, verification failures, pause/resume
+docker compose exec order python seed.py --reset                  # eleven demo orders (ORD-1011 is new)
+python scripts/check_refund_flow.py                               # on the host (standard library only): 7 scenarios
+```
+
+Until the dashboard exists (M12), staff decide with the Ticket API as `agent1`:
+`POST /api/tickets/approvals/{id}/approve` or `.../reject` with `{"note": "..."}` (Swagger: `/api/tickets/docs`).
 
 ## URLs
 

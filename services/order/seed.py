@@ -1,9 +1,9 @@
 # Demo orders for the fixed demo customers created by the identity seed.
 # Run with: docker compose exec order python seed.py           (safe to run again; existing orders are skipped)
-#      or:  docker compose exec order python seed.py --reset   (deletes the ten demo orders with their shipments,
+#      or:  docker compose exec order python seed.py --reset   (deletes the eleven demo orders with their shipments,
 #           return requests and refunds, then creates them again with dates relative to today)
 # Dates are relative to the day the seed runs, so return windows expire as the days pass: use --reset to refresh them.
-# --reset gives the items new ids. Only the ten demo order numbers are touched.
+# --reset gives the items new ids. Only the eleven demo order numbers are touched.
 import sys
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
@@ -63,6 +63,11 @@ DEMO_ORDERS = [
     {
         "order_number": "ORD-1010", "customer_id": CUSTOMER_3, "status": "cancelled", "delivered_days_ago": None,
         "items": [("Notebook set", "accessories", "600")],
+    },
+    {
+        # M9: a large refund (above the auto-approve limit) for testing a rejection
+        "order_number": "ORD-1011", "customer_id": CUSTOMER_3, "status": "delivered", "delivered_days_ago": 4,
+        "items": [("Tablet", "electronics", "24000")],
     },
 ]
 

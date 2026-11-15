@@ -6,6 +6,7 @@ from langgraph.errors import GraphRecursionError
 from sqlalchemy.orm import Session
 
 from app.agent import clients, graph
+from app.agent.prompts import AWAITING_APPROVAL_MESSAGE
 from app.models import AgentRun
 from app.repositories import run_repository
 
@@ -27,7 +28,7 @@ def process_customer_message(db: Session, ticket_id: uuid.UUID, message_id: uuid
         logger.info("Message %s already handled (run %s is %s), nothing to do", message_id, run.id, run.status)
         return
     if run is None:
-        run = run_repository.create(db, ticket_id, message_id)
+        run = run_repository.create(db, ticket_id, "message", message_id, None)
         db.commit()
 
     # Step 2: load the ticket and its conversation from the Ticket service (the source of truth)
@@ -37,7 +38,9 @@ def process_customer_message(db: Session, ticket_id: uuid.UUID, message_id: uuid
         if message["id"] == str(message_id):
             trigger_message = message
     if trigger_message is None:
-        run_repository.update(db, run, "skipped", "message_not_found", None, None, 0, None, datetime.now(timezone.utc))
+        run_repository.update(
+            db, run, "skipped", "message_not_found", None, None, 0, None, None, datetime.now(timezone.utc)
+        )
         db.commit()
         logger.warning("Run %s skipped: message %s is not on ticket %s", run.id, message_id, ticket_id)
         return
@@ -58,8 +61,18 @@ def process_customer_message(db: Session, ticket_id: uuid.UUID, message_id: uuid
                 skip_reason = "human_replied"
     if skip_reason is None and ticket["status"] == "escalated":
         skip_reason = "ticket_escalated"
+    if skip_reason is None and ticket["status"] == "awaiting_approval":
+        skip_reason = "awaiting_approval"
     if skip_reason is not None:
-        run_repository.update(db, run, "skipped", skip_reason, None, None, 0, None, datetime.now(timezone.utc))
+        # While a refund waits for a human, the customer gets one fixed message and no model run: a new run would
+        # start the graph again and overwrite the paused state (M9)
+        reply_message_id = None
+        if skip_reason == "awaiting_approval":
+            message = clients.post_message(str(ticket_id), "ai", AWAITING_APPROVAL_MESSAGE)
+            reply_message_id = uuid.UUID(message["id"])
+        run_repository.update(
+            db, run, "skipped", skip_reason, None, reply_message_id, 0, None, None, datetime.now(timezone.utc)
+        )
         db.commit()
         logger.info("Run %s for message %s skipped: %s", run.id, message_id, skip_reason)
         return
@@ -76,16 +89,23 @@ def process_customer_message(db: Session, ticket_id: uuid.UUID, message_id: uuid
         mark_run_failed(db, ticket_id, message_id, "step_limit")
         return
 
-    # Step 6: record the answer (and the escalation reason, if the AI handed the ticket to a human)
+    # Step 6: record the answer (and the escalation reason, if the AI handed the ticket to a human). A run that
+    # ended paused for a refund approval is completed too (its reply is posted), with a note and the approval id.
+    note = None
+    paused_for_approval_id = None
+    if result["paused_for_approval_id"] is not None:
+        paused_for_approval_id = uuid.UUID(result["paused_for_approval_id"])
+        note = f"paused for approval {paused_for_approval_id}"
     run_repository.update(
         db,
         run,
         "completed",
-        None,
+        note,
         datetime.fromisoformat(result["context_until"]),
         uuid.UUID(result["reply_message_id"]),
         result["tool_call_count"],
         result["escalation_reason"],
+        paused_for_approval_id,
         datetime.now(timezone.utc),
     )
     db.commit()
@@ -94,6 +114,61 @@ def process_customer_message(db: Session, ticket_id: uuid.UUID, message_id: uuid
     )
     if result["escalation_reason"] is not None:
         logger.info("Run %s escalated ticket %s: %s", run.id, ticket_id, result["escalation_reason"])
+    if paused_for_approval_id is not None:
+        logger.info("Run %s paused ticket %s for approval %s", run.id, ticket_id, paused_for_approval_id)
+
+
+# M9: a human approved or rejected a refund. If this ticket's graph is paused for that approval, resume it so it
+# posts the outcome. Called by the Celery task while it holds the per-ticket lock.
+def process_approval_decision(db: Session, ticket_id: uuid.UUID, approval_id: uuid.UUID) -> None:
+    # Step 1: one run per approval. A finished one means this is a duplicate event; a started or failed one means
+    # this is a retry, so reuse it.
+    run = run_repository.get_by_trigger_approval(db, approval_id)
+    if run is not None and run.status in ("completed", "skipped"):
+        logger.info("Approval %s already handled (run %s is %s), nothing to do", approval_id, run.id, run.status)
+        return
+    if run is None:
+        run = run_repository.create(db, ticket_id, "approval", None, approval_id)
+
+    # Step 2: end the transaction before the graph runs (same reason as in process_customer_message)
+    db.commit()
+
+    # Step 3: resume the paused graph, if it waits for this approval
+    result = graph.resume_agent(str(ticket_id), str(approval_id))
+
+    # Step 4: record the outcome message, or that there was nothing waiting (an approval created over REST,
+    # or a duplicate event after the outcome was already posted)
+    if result["resumed"]:
+        reply_message_id = uuid.UUID(result["reply_message_id"])
+        run_repository.update(
+            db, run, "completed", None, None, reply_message_id, 0, None, None, datetime.now(timezone.utc)
+        )
+        logger.info("Approval run %s completed: outcome message %s", run.id, result["reply_message_id"])
+    else:
+        run_repository.update(
+            db, run, "skipped", "no_pending_interrupt", None, None, 0, None, None, datetime.now(timezone.utc)
+        )
+        logger.info("Approval run %s skipped: ticket %s is not waiting for approval %s", run.id, ticket_id, approval_id)
+    db.commit()
+
+
+# M9: final failure of an approval run. Nothing is posted (a human can always follow up); the run is marked failed.
+def mark_approval_run_failed(db: Session, ticket_id: uuid.UUID, approval_id: uuid.UUID, error_text: str) -> None:
+    # Step 1: find the run (it may not exist if the failure happened before it was created)
+    run = run_repository.get_by_trigger_approval(db, approval_id)
+    if run is None:
+        run = run_repository.create(db, ticket_id, "approval", None, approval_id)
+    if run.status in ("completed", "skipped"):
+        logger.info("Run %s is already %s, not marking it failed", run.id, run.status)
+        return
+
+    # Step 2: mark it failed with the error
+    note = error_text[:MAX_NOTE_LENGTH]
+    run_repository.update(
+        db, run, "failed", note, None, run.reply_message_id, 0, None, None, datetime.now(timezone.utc)
+    )
+    db.commit()
+    logger.error("Approval run %s for approval %s failed: %s", run.id, approval_id, note)
 
 
 # Final failure: post ONE fallback message on the ticket and mark the run failed with the error.
@@ -102,7 +177,7 @@ def mark_run_failed(db: Session, ticket_id: uuid.UUID, message_id: uuid.UUID, er
     # Step 1: find the run (it may not exist if the failure happened before it was created)
     run = run_repository.get_by_trigger_message(db, message_id)
     if run is None:
-        run = run_repository.create(db, ticket_id, message_id)
+        run = run_repository.create(db, ticket_id, "message", message_id, None)
     if run.status in ("completed", "skipped"):
         logger.info("Run %s is already %s, not marking it failed", run.id, run.status)
         return
@@ -128,6 +203,7 @@ def mark_run_failed(db: Session, ticket_id: uuid.UUID, message_id: uuid.UUID, er
         reply_message_id,
         run.tool_call_count,
         run.escalation_reason,
+        run.paused_for_approval_id,
         datetime.now(timezone.utc),
     )
     db.commit()

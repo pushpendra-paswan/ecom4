@@ -118,15 +118,16 @@ report("3. Can I return? (customer1)", question, reply, [
     ("no return request exists for the headphones", len(headphones_returns) == 0),
 ])
 
-# Step 7: scenario 4, follow-up on the same ticket: now the return is started
+# Step 7: scenario 4, follow-up on the same ticket: now the return is started. From M9 the AI also requests the
+# refund right away, and 4500 is auto-approved, so the return may already be "refunded" when this check runs.
 question = "Yes please, start the return. They stopped charging."
 call_api("POST", f"/api/tickets/tickets/{return_ticket_id}/messages", {"content": question}, tokens["customer1"])
 reply = wait_for_ai_reply(tokens["customer1"], return_ticket_id, 1, WAIT_LIMIT_SECONDS)
 returns = call_api("GET", "/api/orders/returns", None, tokens["customer1"])
 headphones_returns = [entry for entry in returns if entry["order_item_id"] == headphones["id"]]
 report("4. Start the return (customer1, follow-up)", question, reply, [
-    ("a return request for the headphones exists with status requested",
-     len(headphones_returns) == 1 and headphones_returns[0]["status"] == "requested"),
+    ("a return request for the headphones exists with status requested or refunded (M9)",
+     len(headphones_returns) == 1 and headphones_returns[0]["status"] in ("requested", "refunded")),
 ])
 
 # Step 8: scenario 5, expired window: explained, and no return is created

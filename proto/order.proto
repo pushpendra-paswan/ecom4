@@ -38,11 +38,19 @@ message CreateReturnRequestRequest {
 }
 
 message OrderItem {
+  // M9: the item's return request, so a return started in an earlier conversation can be found
+  message ReturnRequestSummary {
+    string id = 1;
+    string status = 2;         // requested | refunded
+    string refund_amount = 3;
+  }
+
   string id = 1;
   string product_name = 2;
   string category = 3;
   int32 quantity = 4;
   string unit_price = 5;
+  ReturnRequestSummary return_request = 6;  // absent when the item has no return request
 }
 
 message Shipment {

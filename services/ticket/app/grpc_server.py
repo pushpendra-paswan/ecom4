@@ -41,7 +41,8 @@ def abort_from_error(context: grpc.ServicerContext, error: Exception) -> None:
     context.abort(grpc.StatusCode.INTERNAL, "Internal server error")
 
 
-# The caller (the AI agent) is trusted with any ticket id: the ticket id is the agent's conversation thread
+# The callers (the AI agent, and from M9 the Order service) are trusted with any ticket or approval id:
+# the ticket id is the agent's conversation thread
 class TicketServicer(ticket_pb2_grpc.TicketServiceServicer):
     def GetTicket(self, request, context):
         db = SessionLocal()
@@ -133,6 +134,39 @@ class TicketServicer(ticket_pb2_grpc.TicketServiceServicer):
                 status=approval.status,
                 auto_approved=approval.auto_approved,
                 created_at=approval.created_at.isoformat(),
+                decision_note=approval.decision_note,
+                decided_by=str(approval.decided_by) if approval.decided_by else None,
+                decided_at=approval.decided_at.isoformat() if approval.decided_at else None,
+            )
+        except Exception as error:
+            abort_from_error(context, error)
+        finally:
+            db.close()
+
+    # M9: the Order service fetches the approval to verify it before it executes a refund
+    def GetApproval(self, request, context):
+        db = SessionLocal()
+        try:
+            # Step 1: validate the input
+            approval_id = uuid.UUID(request.approval_id)
+
+            # Step 2: call the same service function as the staff REST route (unknown id is NOT_FOUND)
+            approval = approval_service.get_approval(db, approval_id)
+
+            # Step 3: convert to proto (the decision fields are absent while they are empty)
+            return ticket_pb2.Approval(
+                id=str(approval.id),
+                ticket_id=str(approval.ticket_id),
+                action_type=approval.action_type,
+                return_request_id=str(approval.return_request_id),
+                amount=f"{approval.amount:.2f}",
+                summary=approval.summary,
+                status=approval.status,
+                auto_approved=approval.auto_approved,
+                created_at=approval.created_at.isoformat(),
+                decision_note=approval.decision_note,
+                decided_by=str(approval.decided_by) if approval.decided_by else None,
+                decided_at=approval.decided_at.isoformat() if approval.decided_at else None,
             )
         except Exception as error:
             abort_from_error(context, error)

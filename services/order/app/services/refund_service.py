@@ -1,10 +1,12 @@
 import logging
 import uuid
+from decimal import Decimal
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.errors import ConflictError, NotFoundError
+from app.events import publish_event
 from app.models import Refund
 from app.repositories import refund_repository, return_repository
 
@@ -51,3 +53,72 @@ def execute_refund(db: Session, return_request_id: uuid.UUID, approval_id: uuid.
         approval_id,
     )
     return refund, False
+
+
+# M9: executes the refund for an approval decided in the Ticket service, but only after verifying that approval.
+# Called by the Celery task with the approval it just fetched over gRPC (None if the Ticket service does not know it).
+# A failed check refunds nothing: it logs a warning with the reason and returns (no exception, so no retry).
+def execute_approved_refund(db: Session, approval_id: str, approval: dict | None) -> None:
+    # Step 1: the approval must exist, be approved, and be a refund
+    if approval is None:
+        logger.warning("Refund verification failed for approval %s: the Ticket service does not know it", approval_id)
+        return
+    if approval["status"] != "approved":
+        logger.warning("Refund verification failed for approval %s: status is %s", approval_id, approval["status"])
+        return
+    if approval["action_type"] != "refund":
+        logger.warning(
+            "Refund verification failed for approval %s: action type is %s", approval_id, approval["action_type"]
+        )
+        return
+
+    # Step 2: its return request must exist here and still be requested (or already refunded, for a repeat)
+    return_request = return_repository.get_by_id(db, uuid.UUID(approval["return_request_id"]))
+    if return_request is None:
+        logger.warning(
+            "Refund verification failed for approval %s: return request %s does not exist",
+            approval_id,
+            approval["return_request_id"],
+        )
+        return
+    if return_request.status not in ("requested", "refunded"):
+        logger.warning(
+            "Refund verification failed for approval %s: return request status is %s", approval_id, return_request.status
+        )
+        return
+
+    # Step 3: the approved amount must be exactly the return request's refund amount
+    approved_amount = Decimal(approval["amount"])
+    if approved_amount != return_request.refund_amount:
+        logger.warning(
+            "Refund verification failed for approval %s: approved amount %s does not match the refund amount %s",
+            approval_id,
+            approved_amount,
+            return_request.refund_amount,
+        )
+        return
+
+    # Step 4: execute the idempotent refund. A conflict (this return was refunded under another approval, or
+    # this approval was used for another return) is also a verification failure.
+    try:
+        refund, already_processed = execute_refund(db, return_request.id, uuid.UUID(approval["id"]))
+    except ConflictError as error:
+        logger.warning("Refund verification failed for approval %s: %s", approval_id, error)
+        return
+
+    # Step 5: a repeat (duplicate event or retried task) publishes nothing
+    if already_processed:
+        logger.info("Approval %s was already refunded (refund %s), nothing to do", approval_id, refund.id)
+        return
+
+    # Step 6: announce the new refund (after the commit in execute_refund)
+    publish_event(
+        "refund.completed",
+        {
+            "refund_id": refund.id,
+            "approval_id": refund.approval_id,
+            "return_request_id": refund.return_request_id,
+            "ticket_id": approval["ticket_id"],
+            "customer_id": return_request.customer_id,
+        },
+    )

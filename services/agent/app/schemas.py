@@ -12,12 +12,15 @@ class RunResponse(BaseModel):
 
     id: uuid.UUID
     ticket_id: uuid.UUID
-    trigger_message_id: uuid.UUID
+    run_type: str
+    trigger_message_id: uuid.UUID | None
+    trigger_approval_id: uuid.UUID | None
     status: str
     note: str | None
     context_until: datetime | None
     reply_message_id: uuid.UUID | None
     tool_call_count: int
     escalation_reason: str | None
+    paused_for_approval_id: uuid.UUID | None
     started_at: datetime
     finished_at: datetime | None

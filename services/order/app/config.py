@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     # Service tokens on gRPC calls: the shared HS256 secret, and the comma-separated caller names allowed in
     service_token_secret: str
     grpc_allowed_callers: str
+    # M9: the Ticket gRPC server this service calls to verify approvals (with a token signed as sub=order)
+    ticket_grpc_address: str = "ticket:50053"
 
 
 settings = Settings()

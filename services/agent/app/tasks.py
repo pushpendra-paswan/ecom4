@@ -80,3 +80,66 @@ def run_agent_for_message(
             lock.release()
         except redis.exceptions.LockError:
             logger.warning("Lock for ticket %s had already expired", ticket_id)
+
+
+# M9: resume a ticket's paused graph after a human decided a refund approval (queued by the consumer for
+# approval.decided events with auto_approved=false). Same lock, retries and session handling as
+# run_agent_for_message; after the last failure the run is marked failed and NOTHING is posted (a human can always
+# follow up on the ticket).
+@celery_app.task(
+    name="app.tasks.resume_after_approval",
+    bind=True,
+    acks_late=True,
+    ignore_result=True,
+    soft_time_limit=90,
+    max_retries=None,  # our own counters below decide when to stop
+)
+def resume_after_approval(
+    self, ticket_id: str, approval_id: str, lock_retries: int = 0, failure_retries: int = 0
+) -> None:
+    # Step 1: take the per-ticket lock without waiting; if another run holds it, try again in 3 seconds
+    lock = redis_client.lock(f"agent:lock:{ticket_id}", timeout=LOCK_TIMEOUT_SECONDS, blocking=False)
+    if not lock.acquire():
+        if lock_retries < MAX_LOCK_RETRIES:
+            logger.info("Ticket %s is busy, approval %s waits for the lock (%d)", ticket_id, approval_id, lock_retries + 1)
+            raise self.retry(
+                args=[ticket_id, approval_id],
+                kwargs={"lock_retries": lock_retries + 1, "failure_retries": failure_retries},
+                countdown=LOCK_RETRY_SECONDS,
+            )
+        # The lock stayed busy for a minute: give up (nothing is posted)
+        db = SessionLocal()
+        try:
+            run_service.mark_approval_run_failed(db, uuid.UUID(ticket_id), uuid.UUID(approval_id), "lock_busy")
+        finally:
+            db.close()
+        return
+
+    db = SessionLocal()
+    try:
+        # Step 2: resume the paused graph (if it waits for this approval) and record the run
+        run_service.process_approval_decision(db, uuid.UUID(ticket_id), uuid.UUID(approval_id))
+    except Exception as error:
+        # Step 3: retry with an exponential countdown; after the last retry record the error
+        db.rollback()
+        if failure_retries < MAX_FAILURE_RETRIES:
+            countdown = FIRST_RETRY_SECONDS * 2**failure_retries
+            logger.warning(
+                "Resume for approval %s failed (%r), retry %d in %d s", approval_id, error, failure_retries + 1, countdown
+            )
+            raise self.retry(
+                args=[ticket_id, approval_id],
+                kwargs={"lock_retries": lock_retries, "failure_retries": failure_retries + 1},
+                countdown=countdown,
+                exc=error,
+            )
+        run_service.mark_approval_run_failed(
+            db, uuid.UUID(ticket_id), uuid.UUID(approval_id), f"{type(error).__name__}: {error}"
+        )
+    finally:
+        # Step 4: always close the session and release the lock we hold (it may have expired meanwhile)
+        db.close()
+        try:
+            lock.release()
+        except redis.exceptions.LockError:
+            logger.warning("Lock for ticket %s had already expired", ticket_id)
