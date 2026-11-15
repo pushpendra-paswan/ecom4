@@ -10,11 +10,14 @@ celery_app = Celery(
     include=["app.tasks"],  # the worker imports this module to find the tasks
 )
 
-# Step 2: JSON only (task arguments are plain strings), and log times in UTC
+# Step 2: JSON only (task arguments are plain strings), log times in UTC, and our OWN queue: the agent service
+# uses the same RabbitMQ as its broker, so with the shared default queue ("celery") each worker would receive the
+# other service's tasks. The worker is started with `-Q knowledge`.
 celery_app.conf.update(
     task_serializer="json",
     result_serializer="json",
     accept_content=["json"],
     timezone="UTC",
     enable_utc=True,
+    task_default_queue="knowledge",
 )

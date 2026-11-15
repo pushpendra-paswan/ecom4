@@ -46,6 +46,18 @@ Nginx is already running, run `docker compose restart nginx`.
 
 Throwaway test page (open it in several tabs, one per user): http://localhost:8080/test/realtime.html
 
+## AI agent (M7)
+
+When a customer writes on a ticket, the agent answers within a few seconds using the policy documents.
+`agent-consumer` turns `ticket.message_created` events into Celery tasks, `agent-worker` runs the LangGraph agent.
+
+```bash
+docker compose logs -f agent-worker agent-consumer
+python scripts/check_agent_answers.py   # on the host (standard library only): 8 scenarios with PASS/FAIL
+```
+
+Staff can see every run (answered, skipped, failed) at `GET /api/agent/runs` (Swagger: `/api/agent/docs`).
+
 ## URLs
 
 | What | URL |

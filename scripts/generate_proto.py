@@ -11,11 +11,13 @@ from grpc_tools import protoc
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 PROTO_DIR = REPO_ROOT / "proto"
 
-# Each output folder and the .proto files it gets: every service only its own, the scripts folder all three
+# Each output folder and the .proto files it gets: every server only its own; the agent (the client of all three
+# servers) and the scripts folder get all three
 TARGETS = {
     "services/order/app/generated": ["order.proto"],
     "services/knowledge/app/generated": ["knowledge.proto"],
     "services/ticket/app/generated": ["ticket.proto"],
+    "services/agent/app/generated": ["order.proto", "knowledge.proto", "ticket.proto"],
     "scripts/generated": ["order.proto", "knowledge.proto", "ticket.proto"],
 }
 

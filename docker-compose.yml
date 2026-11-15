@@ -183,7 +183,8 @@ services:
       GRPC_ALLOWED_CALLERS: none
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL}
-    command: ["celery", "-A", "app.celery_app", "worker", "--loglevel=info"]
+    # its own Celery queue (the agent worker uses the same RabbitMQ with queue "agent")
+    command: ["celery", "-A", "app.celery_app", "worker", "-Q", "knowledge", "--loglevel=info"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -192,6 +193,7 @@ services:
       rabbitmq:
         condition: service_healthy
 
+  # Agent API: only GET /runs and /health (staff visibility). The AI itself runs in agent-worker.
   agent:
     build: ./services/agent
     environment:
@@ -201,6 +203,69 @@ services:
       DATABASE_URL: ${AGENT_DATABASE_URL}
       REDIS_URL: ${REDIS_URL}
       RABBITMQ_URL: ${RABBITMQ_URL}
+      JWT_PUBLIC_KEY_PATH: ${JWT_PUBLIC_KEY_PATH}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      CHAT_MODEL: ${CHAT_MODEL}
+      SERVICE_TOKEN_SECRET: ${SERVICE_TOKEN_SECRET:?set SERVICE_TOKEN_SECRET in .env}
+      KNOWLEDGE_GRPC_ADDRESS: knowledge:50052
+      TICKET_GRPC_ADDRESS: ticket:50053
+      ORDER_GRPC_ADDRESS: order:50051
+      AGENT_RECURSION_LIMIT: ${AGENT_RECURSION_LIMIT}
+      AGENT_HISTORY_LIMIT: ${AGENT_HISTORY_LIMIT}
+    # run the migration first, then start the API ($$ stops Compose from replacing PORT itself)
+    command: ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port $${PORT}"]
+    # only the public key folder: the agent service verifies staff tokens, it never signs them
+    volumes:
+      - ./keys/public:/keys/public:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  # Celery worker for the agent: same image, runs the LangGraph agent (task run_agent_for_message, queue "agent")
+  agent-worker:
+    build: ./services/agent
+    environment:
+      SERVICE_NAME: agent-worker
+      DATABASE_URL: ${AGENT_DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      RABBITMQ_URL: ${RABBITMQ_URL}
+      # required by the shared config.py; the worker never checks user tokens, so the key folder is not mounted
+      JWT_PUBLIC_KEY_PATH: ${JWT_PUBLIC_KEY_PATH}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      CHAT_MODEL: ${CHAT_MODEL}
+      SERVICE_TOKEN_SECRET: ${SERVICE_TOKEN_SECRET:?set SERVICE_TOKEN_SECRET in .env}
+      KNOWLEDGE_GRPC_ADDRESS: knowledge:50052
+      TICKET_GRPC_ADDRESS: ticket:50053
+      ORDER_GRPC_ADDRESS: order:50051
+      AGENT_RECURSION_LIMIT: ${AGENT_RECURSION_LIMIT}
+      AGENT_HISTORY_LIMIT: ${AGENT_HISTORY_LIMIT}
+    command: ["celery", "-A", "app.celery_app", "worker", "-Q", "agent", "--loglevel=info"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  # Event consumer for the agent: same image; turns ticket.message_created (customer messages) into Celery tasks
+  agent-consumer:
+    build: ./services/agent
+    environment:
+      SERVICE_NAME: agent-consumer
+      RABBITMQ_URL: ${RABBITMQ_URL}
+      REDIS_URL: ${REDIS_URL}
+      # only required by the shared config.py: the consumer never uses a database, a model, tokens or gRPC
+      DATABASE_URL: not-used-by-the-consumer
+      JWT_PUBLIC_KEY_PATH: not-used-by-the-consumer
+      OPENAI_API_KEY: not-used-by-the-consumer
+      CHAT_MODEL: not-used-by-the-consumer
+      SERVICE_TOKEN_SECRET: not-used-by-the-consumer
+    command: ["python", "-m", "app.consumer"]
     depends_on:
       postgres:
         condition: service_healthy
