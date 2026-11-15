@@ -1,0 +1,25 @@
+// Knowledge service contract: semantic search over the policy documents.
+syntax = "proto3";
+
+package knowledge;
+
+service KnowledgeService {
+  rpc Search(SearchRequest) returns (SearchResponse);
+}
+
+message SearchRequest {
+  string query = 1;  // 1 to 500 characters
+  int32 top_k = 2;   // 1 to 10; 0 means the default (4)
+}
+
+message SearchResult {
+  string document_id = 1;
+  string title = 2;
+  string section = 3;
+  string content = 4;
+  double score = 5;  // cosine similarity: higher is better, 1.0 is a perfect match
+}
+
+message SearchResponse {
+  repeated SearchResult results = 1;  // best match first
+}

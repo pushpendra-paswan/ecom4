@@ -1,0 +1,61 @@
+// Ticket service contract. Money is a string with two decimals ("4500.00"), dates are ISO-8601 strings, ids are strings.
+syntax = "proto3";
+
+package ticket;
+
+service TicketService {
+  rpc GetTicket(GetTicketRequest) returns (Ticket);
+  rpc PostMessage(PostMessageRequest) returns (Message);
+  rpc CreateApproval(CreateApprovalRequest) returns (Approval);
+}
+
+message GetTicketRequest {
+  string ticket_id = 1;
+}
+
+message PostMessageRequest {
+  string ticket_id = 1;
+  string sender_type = 2;  // only "ai" or "system" over gRPC
+  string content = 3;      // 1 to 5000 characters
+}
+
+message CreateApprovalRequest {
+  string ticket_id = 1;
+  string action_type = 2;        // "refund"
+  string return_request_id = 3;
+  string amount = 4;             // > 0, at most two decimals, e.g. "4500.00"
+  string summary = 5;            // 1 to 1000 characters
+}
+
+message Message {
+  string id = 1;
+  string sender_type = 2;          // customer | ai | agent | system
+  optional string sender_id = 3;   // absent for ai and system messages
+  string content = 4;
+  string created_at = 5;
+}
+
+// A ticket with its conversation history (messages oldest first)
+message Ticket {
+  string id = 1;
+  string customer_id = 2;
+  string customer_email = 3;
+  string subject = 4;
+  string status = 5;                      // open | awaiting_approval | escalated | resolved
+  optional string assigned_agent_id = 6;  // absent when nobody is assigned
+  string created_at = 7;
+  string updated_at = 8;
+  repeated Message messages = 9;
+}
+
+message Approval {
+  string id = 1;
+  string ticket_id = 2;
+  string action_type = 3;
+  string return_request_id = 4;
+  string amount = 5;
+  string summary = 6;
+  string status = 7;  // pending | approved | rejected
+  bool auto_approved = 8;
+  string created_at = 9;
+}

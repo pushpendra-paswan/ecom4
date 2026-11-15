@@ -15,6 +15,23 @@ docker compose exec identity python seed.py   # demo users (password: Password12
 
 Reset everything (databases included): `docker compose down -v`
 
+## gRPC (M5)
+
+Order (50051), Knowledge (50052) and Ticket (50053) also serve gRPC, published on `127.0.0.1` only (development).
+Every call needs a service token (HS256, `SERVICE_TOKEN_SECRET` in `.env`).
+
+Host-side tools (code generation and the check script) need these exact versions; a virtual environment is easiest:
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install grpcio-tools==1.85.1 grpcio==1.85.1 protobuf==7.35.1 PyJWT==2.15.1
+python scripts/generate_proto.py      # only after changing a file in proto/ (the generated code is committed)
+python scripts/grpc_client_check.py   # with the stack up and seeded: one PASS/FAIL line per step
+```
+
+`grpcio-tools` is installed on the host only, never in the services. It bundles protoc 35.1, whose generated code
+requires `protobuf>=7.35.1` and `grpcio>=1.85.1` at runtime; the services pin exactly those, so change all three together.
+
 ## URLs
 
 | What | URL |

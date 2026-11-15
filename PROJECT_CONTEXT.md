@@ -11,9 +11,10 @@ An AI Customer Support Automation Platform for a simulated e-commerce company, b
 - Browser → Nginx (`localhost:8080`) → services over REST. Nginx strips the prefix (`/api/orders/health` reaches the order service as `/health`).
 - WebSockets: `/ws/<path>` → realtime service as `/<path>`, with upgrade headers.
 - Celery (M4): the knowledge service queues document ingestion on RabbitMQ (Celery's default `celery` queue, not the events exchange); the `knowledge-worker` container runs it; Redis is the Celery result backend.
-- Planned (not built yet): gRPC for synchronous service-to-service calls (M5), RabbitMQ topic exchange `support.events` for events (M6), Redis per-ticket locks and WebSocket fan-out.
+- gRPC (M5): Order (50051), Knowledge (50052) and Ticket (50053) run a synchronous gRPC server **in the same container and process** as their FastAPI app, beside REST. Servicers are thin entry points that call the same service functions as the routers. Every call carries a short-lived HS256 service token checked by a server interceptor. The only intended caller so far is the agent service (M7+); today only `scripts/grpc_client_check.py` calls them.
+- Planned (not built yet): RabbitMQ topic exchange `support.events` for events (M6), Redis per-ticket locks and WebSocket fan-out.
 - Auth: Identity signs RS256 JWTs with a private key; every other service verifies them locally with the public key (no call to Identity).
-- Current state (M4): Identity, Order, Ticket and Knowledge have databases and real endpoints (REST only, no calls between services). Knowledge also has a Celery worker and RAG search (OpenAI embeddings in pgvector). Agent and realtime only expose `GET /health`. RabbitMQ and Redis are used only by Celery so far.
+- Current state (M5): Identity, Order, Ticket and Knowledge have databases and real REST endpoints; Order, Knowledge and Ticket also serve gRPC. No service calls another yet. Knowledge also has a Celery worker and RAG search (OpenAI embeddings in pgvector). Agent and realtime only expose `GET /health`. RabbitMQ and Redis are used only by Celery so far.
 
 ## 3. Tech stack
 
@@ -21,20 +22,21 @@ Python 3.12, FastAPI 0.162.7, Uvicorn 0.54.0, pydantic-settings 2.16.3. Postgres
 Identity (M1) also uses SQLAlchemy 2.1.8 (sync), psycopg 3.3.9 (binary), Alembic 1.20.1, PyJWT 2.15.1, cryptography 50.0.2, argon2-cffi 25.1.0, email-validator 2.3.0.
 Order (M2) and Ticket (M3) use the same pinned SQLAlchemy, psycopg, Alembic, PyJWT and cryptography versions as Identity.
 Knowledge (M4) uses the same database/JWT pins plus Celery 5.7.0, redis 8.1.0, langchain-openai 1.8.0, langchain-core 1.8.0, langchain-text-splitters 1.1.3, langchain-postgres 0.0.19 (pulls in openai, pgvector-python, tiktoken, numpy).
-Later milestones add: pika/aio-pika, grpcio, LangGraph (see `CLAUDE.md` section 7).
+Order, Knowledge and Ticket (M5) add grpcio 1.85.1 and protobuf 7.35.1. Host only (never in a service): grpcio-tools 1.85.1 (bundles protoc 35.1) for code generation, plus PyJWT 2.15.1 for the check script.
+Later milestones add: pika/aio-pika, LangGraph (see `CLAUDE.md` section 7).
 
 ## 4. Services
 
 | Service | Purpose | REST port | gRPC port | Database | Nginx prefix |
 |---|---|---|---|---|---|
 | identity | Users, login, JWT issuing | 8001 | – | identity_db | `/api/identity/` |
-| ticket | Tickets, messages, approvals | 8002 | 50053 (M5) | ticket_db | `/api/tickets/` |
-| order | Mock orders, returns, simulated refunds | 8003 | 50051 (M5) | order_db | `/api/orders/` |
-| knowledge | Policy documents, RAG search | 8004 | 50052 (M5) | knowledge_db (pgvector) | `/api/knowledge/` |
+| ticket | Tickets, messages, approvals | 8002 | 50053 | ticket_db | `/api/tickets/` |
+| order | Mock orders, returns, simulated refunds | 8003 | 50051 | order_db | `/api/orders/` |
+| knowledge | Policy documents, RAG search | 8004 | 50052 | knowledge_db (pgvector) | `/api/knowledge/` |
 | agent | LangGraph AI agent | 8005 | – | agent_db | `/api/agent/` |
 | realtime | WebSocket push to browsers | 8006 | – | none | `/ws/` |
 
-Published to the host: Nginx `8080`, RabbitMQ management UI `15672`. Service ports, Postgres, Redis and AMQP are internal only.
+Published to the host: Nginx `8080`, RabbitMQ management UI `15672`, and the three gRPC ports **bound to `127.0.0.1` only** (`127.0.0.1:50051:50051` etc.) so the host-side check script can reach them; this is a development-only choice (other containers use `order:50051`, `knowledge:50052`, `ticket:50053`). REST service ports, Postgres, Redis and AMQP are internal only.
 
 ## 5. Repository structure
 
@@ -44,11 +46,14 @@ Published to the host: Nginx `8080`, RabbitMQ management UI `15672`. Service por
 ├── docker-compose.yml, .env.example, .env (not committed), .gitignore
 ├── keys/                      # not committed: private/private.pem, public/public.pem
 ├── nginx/nginx.conf
-├── proto/                     # .gitkeep only (M5)
+├── proto/                     # M5: order.proto, knowledge.proto, ticket.proto (source of truth for gRPC)
 ├── scripts/
 │   ├── init_databases.sql     # Postgres init: 5 databases + vector extension
 │   ├── generate_keys.py       # creates the RSA key pair in keys/
-│   └── check_knowledge_search.py  # M4: 10 questions against /api/knowledge/search (stdlib only, run on the host)
+│   ├── check_knowledge_search.py  # M4: 10 questions against /api/knowledge/search (stdlib only, run on the host)
+│   ├── generate_proto.py      # M5: protoc → services/<order|knowledge|ticket>/app/generated/ and scripts/generated/
+│   ├── grpc_client_check.py   # M5: PASS/FAIL check of every RPC, deadlines, validation and service tokens (host)
+│   └── generated/             # M5: generated stubs for all three protos (committed)
 ├── frontend/
 │   ├── customer/  index.html, app.js (placeholder health check)
 │   └── agent/     index.html, app.js (placeholder health check)
@@ -58,6 +63,11 @@ Published to the host: Nginx `8080`, RabbitMQ management UI `15672`. Service por
     └── app/
         ├── main.py            # FastAPI app + GET /health
         └── config.py          # pydantic-settings
+
+services/order/, services/knowledge/, services/ticket/ (M5) additionally have:
+    └── app/
+        ├── grpc_server.py     # servicer, abort_from_error, ServiceTokenInterceptor, start/stop_grpc_server
+        └── generated/         # <name>_pb2.py, <name>_pb2_grpc.py (generated, committed; do not edit)
 
 services/knowledge/ (M4) additionally has:
     ├── alembic.ini, alembic/  # same pattern; env.py ignores langchain_pg_* tables; versions/0001_create_documents.py
@@ -166,7 +176,7 @@ Error mapping (identity `main.py`): `NotFoundError` 404, `UnauthorizedError` 401
 | `GET /returns/{return_id}` | customer (own only), agent, admin (any) | 200 return request; 404 |
 | `POST /refunds/execute` `{return_request_id, approval_id}` | admin | 201 new refund; **200** same `approval_id` again (`already_processed: true`, nothing created); 409 different approval for an already-refunded return, or an approval already used for another return; 404 unknown return |
 
-**Return eligibility result** (the gRPC contract in M5 copies this exact shape): `eligible` (bool), `reason_code` (`eligible` | `not_delivered` | `non_returnable` | `window_expired` | `already_requested`), `reason` (sentence), `refund_amount` (quantity × unit price, only when eligible, else null), `window_days` and `days_remaining` (set once the order is delivered and the category is returnable, else null; `days_remaining` is 0 when expired). Rules, checked in this order (constants at the top of `return_service.py`): item belongs to the order (else 404) → order is `delivered` (with a shipment delivery date) → category is not `gift_card`/`perishable` → `days_since_delivery <= window` (30 days, **15 for `electronics`**) → no existing return request for the item. Decided per whole order line, no partial quantities. `create_return_request` runs the same check again and never trusts an earlier one.
+**Return eligibility result** (gRPC `ReturnEligibility` has the same shape): `eligible` (bool), `reason_code` (`eligible` | `not_delivered` | `non_returnable` | `window_expired` | `already_requested`), `reason` (sentence), `refund_amount` (quantity × unit price, only when eligible, else null), `window_days` and `days_remaining` (set once the order is delivered and the category is returnable, else null; `days_remaining` is 0 when expired). Rules, checked in this order (constants at the top of `return_service.py`): item belongs to the order (else 404) → order is `delivered` (with a shipment delivery date) → category is not `gift_card`/`perishable` → `days_since_delivery <= window` (30 days, **15 for `electronics`**) → no existing return request for the item. Decided per whole order line, no partial quantities. `create_return_request` runs the same check again and never trusts an earlier one.
 
 **Refund execution** (`refund_service.execute_refund`, simulated, logs one INFO line per refund): amount always comes from the return request. Idempotent through the unique constraints on `refunds.approval_id` and `refunds.return_request_id`: a repeated `approval_id` returns the existing refund; if two calls race, the loser's insert fails, it rolls back and returns the winner's refund (same approval) or a 409 (different approval). Verified with 8 parallel calls: exactly one 201. In M9 a Celery task will call this same function.
 
@@ -184,7 +194,7 @@ Error mapping (identity `main.py`): `NotFoundError` 404, `UnauthorizedError` 401
 | `GET /approvals/{approval_id}` | staff | 200 approval; 404 |
 | `POST /approvals/{approval_id}/approve` `{note?}` (body optional) | staff | 200 approval (`approved`, `decided_by` = caller); 409 already decided; 404 |
 | `POST /approvals/{approval_id}/reject` `{note}` (required, not blank) | staff | 200 approval (`rejected`, note stored); 422 missing/blank note; 409 already decided; 404 |
-The REST API can never create `ai` or `system` messages. `ticket_service.add_message` takes `sender_type`/`sender_id` as parameters so the gRPC layer can post `ai`/`system` messages later.
+The REST API can never create `ai` or `system` messages. `ticket_service.add_message` takes `sender_type`/`sender_id` as parameters; gRPC `PostMessage` (M5) uses it to post `ai`/`system` messages.
 
 **Ticket statuses and what changes them:**
 - New ticket → `open`.
@@ -215,10 +225,10 @@ The REST API can never create `ai` or `system` messages. `ticket_service.add_mes
 | `GET /documents/{document_id}` | staff | 200 document with `content`; 404 |
 | `POST /documents/{document_id}/reingest` | admin | **202** document back to `pending` (chunk count kept until replaced), ingestion queued; allowed in any status |
 | `DELETE /documents/{document_id}` | admin | **204**; chunks deleted from PGVector first, then the row |
-| `POST /search` `{query (1–500), top_k (1–10, default 4)}` | staff | 200 `{results: [SearchResult]}`, best first. Staff-only because every search is a paid embedding call; the agent will use gRPC (M5) |
+| `POST /search` `{query (1–500), top_k (1–10, default 4)}` | staff | 200 `{results: [SearchResult]}`, best first. Staff-only because every search is a paid embedding call; the agent uses gRPC `KnowledgeService.Search` |
 No content updates: delete and re-create a document to change it.
 
-**SearchResult** (M5 copies this into the `.proto`): `document_id` (UUID string), `title` (document title), `section` (the H2 heading the chunk came from, or `Overview` for text before the first H2), `content` (chunk text, starting with `Title > Section` and a blank line), `score` (float, 4 decimals). **Score = 1 − cosine distance** = cosine similarity: PGVector's default distance is cosine (0 = identical direction), so higher is better and 1.0 is a perfect match. Seed-doc matches for good questions score about 0.53–0.82.
+**SearchResult** (same fields in gRPC `knowledge.SearchResult`): `document_id` (UUID string), `title` (document title), `section` (the H2 heading the chunk came from, or `Overview` for text before the first H2), `content` (chunk text, starting with `Title > Section` and a blank line), `score` (float, 4 decimals). **Score = 1 − cosine distance** = cosine similarity: PGVector's default distance is cosine (0 = identical direction), so higher is better and 1.0 is a perfect match. Seed-doc matches for good questions score about 0.53–0.82.
 
 **Ingestion flow:** create/reingest → service commits the row (`pending`) → `celery_app.send_task("app.tasks.ingest_document", [document_id])` → worker: `process_ingestion` sets `processing` → `rag.ingest_document_chunks` → `ready` + `chunk_count`, or on any error `failed` + `error_message` (`"<ErrorType>: <message>"`, ≤1000 chars), `chunk_count` 0, and the error is re-raised so Celery retries. Between retries the status shows `failed`, then `processing` again. A task for a deleted document logs a warning and does nothing.
 
@@ -248,11 +258,64 @@ No content updates: delete and re-create a document to change it.
 
 **Search check** (`python scripts/check_knowledge_search.py` on the host; logs in as agent1, `top_k=3`, maps `document_id` → slug via `GET /documents`): last run (2026-11-15) **rank 1: 10/10, top 3: 10/10**. Target: rank 1 ≥ 9/10, top 3 10/10. If results get worse, change the documents or chunking, never the questions.
 
-**gRPC:** none yet. **Events:** none yet. **Celery tasks:** `app.tasks.ingest_document` (knowledge, above).
+**gRPC (M5).** Contracts in `/proto` (proto3; packages `order`, `knowledge`, `ticket`; unary RPCs only). Conventions: money is a string with two decimals (`"4500.00"`), dates are ISO-8601 strings (`"2026-11-15"`, timestamps `"2026-11-15T10:00:00.123+00:00"`), ids are UUID strings, `optional` fields may be absent (check with `HasField`). Each servicer method opens its own DB session, validates input (UUIDs, plus the **same Pydantic schema as the REST route**: `ReturnRequestCreate`, `MessageCreate`, `ApprovalCreate`, `SearchRequest`), calls the same service function as REST, converts the result, closes the session.
+
+*OrderService* (`order:50051`). The caller supplies `customer_id` (required, valid UUID, else `INVALID_ARGUMENT`); every lookup is filtered by it exactly like the customer REST path, so another customer's order is `NOT_FOUND`.
+| RPC | Request | Response |
+|---|---|---|
+| `ListOrders` | `customer_id` | `ListOrdersResponse{orders[]}` (by order number) |
+| `GetOrder` | `order_number`, `customer_id` | `Order` |
+| `CheckReturnEligibility` | `order_number`, `order_item_id`, `customer_id` | `ReturnEligibility`. Ineligible is a normal answer (`eligible=false` + reason code), not an error |
+| `CreateReturnRequest` | `order_number`, `order_item_id`, `reason` (1–500), `customer_id` | `ReturnRequest`. Not eligible → `INVALID_ARGUMENT` (reason in details); already requested → `ALREADY_EXISTS`; unknown order/item → `NOT_FOUND` |
+- `Order{order_number, customer_id, status, total_amount, ordered_at, items[], shipment}`; `shipment` is absent for placed/cancelled orders.
+- `OrderItem{id, product_name, category, quantity (int32), unit_price}`.
+- `Shipment{carrier, tracking_number, status, shipped_on, estimated_delivery, optional delivered_on}`.
+- `ReturnEligibility{eligible, reason_code, reason, optional refund_amount, window_days, optional days_remaining}`: same reason codes as REST; `refund_amount` only when eligible; `window_days` is **0** where REST has null (no window applies); `days_remaining` absent where REST has null, 0 when expired.
+- `ReturnRequest{id, order_number, order_item_id, status, refund_amount, reason, created_at}`.
+
+*KnowledgeService* (`knowledge:50052`)
+| RPC | Request | Response |
+|---|---|---|
+| `Search` | `query` (1–500), `top_k` (1–10; **0 = default 4**) | `SearchResponse{results[]}`, best first; `SearchResult{document_id, title, section, content, score (double)}`. Out-of-range input → `INVALID_ARGUMENT`; OpenAI failure → `INTERNAL` |
+
+*TicketService* (`ticket:50053`). The caller is trusted with any ticket id (no customer filter, like the staff REST path); the ticket id is the agent's conversation thread.
+| RPC | Request | Response |
+|---|---|---|
+| `GetTicket` | `ticket_id` | `Ticket{id, customer_id, customer_email, subject, status, optional assigned_agent_id, created_at, updated_at, messages[]}`, messages oldest first (the conversation history) |
+| `PostMessage` | `ticket_id`, `sender_type` (**only `ai` or `system`**, else `INVALID_ARGUMENT`), `content` (1–5000) | `Message{id, sender_type, optional sender_id, content, created_at}`; `sender_id` always absent. Same `ticket_service.add_message` as REST (bumps `updated_at`, never reopens) |
+| `CreateApproval` | `ticket_id`, `action_type` (**required**, `"refund"`), `return_request_id`, `amount` (string, >0, ≤2 decimals), `summary` (1–1000) | `Approval{id, ticket_id, action_type, return_request_id, amount, summary, status, auto_approved, created_at}`. Same `approval_service.create_approval` as REST: auto-approve limit, one approval per return request (`ALREADY_EXISTS`), pending → ticket `awaiting_approval`; unknown ticket `NOT_FOUND` |
+
+*Error mapping* (one `abort_from_error` per service in `grpc_server.py`; REST mapping unchanged):
+| Service error | gRPC status |
+|---|---|
+| `NotFoundError` | `NOT_FOUND` |
+| `UnauthorizedError` | `UNAUTHENTICATED` |
+| `ForbiddenError` | `PERMISSION_DENIED` |
+| `ConflictError` | `ALREADY_EXISTS` |
+| `BadRequestError`, `ValueError` (covers Pydantic `ValidationError` and a malformed UUID) | `INVALID_ARGUMENT` (message = the error text) |
+| anything else | `INTERNAL` with `"Internal server error"`; traceback logged |
+
+*Deadlines:* every client call sets a deadline (`timeout=` in Python). Convention: **5 s** default, **15 s** for `KnowledgeService.Search` (embedding call). The agent's clients (M7+) must follow it.
+
+*Service tokens* (Part B):
+- Every call sends metadata `authorization: Bearer <token>`. Token = JWT, **HS256**, signed with `SERVICE_TOKEN_SECRET` (shared, from `.env`), claims `sub` (calling service name), `iat`, `exp` = `iat + 60 s`. Callers mint a fresh token per call (or at least well within 60 s).
+- `ServiceTokenInterceptor` (a `grpc.ServerInterceptor` in each `grpc_server.py`) checks it before any servicer code runs: missing, malformed, wrong signature, expired or missing claim → `UNAUTHENTICATED`; valid but `sub` not in `GRPC_ALLOWED_CALLERS` → `PERMISSION_DENIED`. It rejects by returning a unary handler that calls `context.abort`, and logs a warning.
+- Allowlists (`GRPC_ALLOWED_CALLERS`, comma-separated, set literally in `docker-compose.yml`): order `agent`, knowledge `agent`, ticket `agent`.
+- **Adding a caller:** give the calling service `SERVICE_TOKEN_SECRET` and have it sign with `sub=<its name>`; add that name to the target's `GRPC_ALLOWED_CALLERS` in `docker-compose.yml`; recreate the target container.
+- Service identity only. End-user identity is the `customer_id` the trusted caller puts in the request; REST endpoints are unaffected (still RS256 user JWTs).
+
+*Trust model:* gRPC callers are trusted to supply the right `customer_id` (and any `ticket_id`). The servers still enforce ownership for that customer, but they cannot know whether the caller picked the right customer. That is why only allowlisted services get in, and why in the agent (M7+) `customer_id`/`ticket_id` must be injected by code, never chosen by the model (`CLAUDE.md` section 9).
+
+*Server lifecycle:* `start_grpc_server()` is called from the FastAPI `lifespan` in `main.py`: sync `grpc.server(ThreadPoolExecutor(max_workers=10), interceptors=[ServiceTokenInterceptor()])`, `add_insecure_port("0.0.0.0:<GRPC_PORT>")`, `start()` (non-blocking; gRPC serves on its own threads). Logs `gRPC server listening on port N (allowed callers: ...)`. `stop_grpc_server()` on shutdown (`stop(grace=5)`). No reflection, health service, streaming or TLS.
+
+*Code generation:* `python scripts/generate_proto.py` (host, from the repo root) runs `grpc_tools.protoc` per target: each service gets only its own proto in `app/generated/`, `scripts/generated/` gets all three; it writes an `__init__.py` and rewrites `import x_pb2 as ...` in `*_pb2_grpc.py` to `from . import x_pb2 as ...` (the absolute import breaks inside a package). Generated code is committed; regenerating with the same versions is byte-identical. **Pins must match:** grpcio-tools 1.85.1 bundles protoc 35.1; its `*_pb2.py` refuses to load on protobuf < 7.35.1 and its `*_pb2_grpc.py` on grpcio < 1.85.1. Services pin `grpcio==1.85.1`, `protobuf==7.35.1`. Upgrade all three together and regenerate.
+
+**Events:** none yet. **Celery tasks:** `app.tasks.ingest_document` (knowledge, above).
 
 **Environment variables per service** (set in `docker-compose.yml`, values from `.env`):
 `SERVICE_NAME`, `PORT`, `ROOT_PATH` (the Nginx prefix), `DATABASE_URL` (not for realtime), `REDIS_URL`, `RABBITMQ_URL`. Identity also gets `JWT_PRIVATE_KEY_PATH`, `JWT_PUBLIC_KEY_PATH`, `ACCESS_TOKEN_EXPIRE_MINUTES`. Order also gets `JWT_PUBLIC_KEY_PATH` (and mounts only `keys/public`). Ticket gets `JWT_PUBLIC_KEY_PATH` and `REFUND_AUTO_APPROVE_LIMIT` (mounts only `keys/public`). Knowledge gets `JWT_PUBLIC_KEY_PATH`, `OPENAI_API_KEY`, `EMBEDDING_MODEL` (mounts only `keys/public`). `knowledge-worker` gets the same variables as knowledge minus `PORT`/`ROOT_PATH` (`SERVICE_NAME=knowledge-worker`) and mounts no keys (it never checks tokens; the path is only required by `config.py`).
-`.env` also holds the three JWT settings above (paths are container paths), `POSTGRES_USER`, `POSTGRES_PASSWORD`, `<SERVICE>_DATABASE_URL` ×5, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`, `OPENAI_API_KEY`, `EMBEDDING_MODEL` (knowledge + worker), `CHAT_MODEL` (not passed to any service yet), `REFUND_AUTO_APPROVE_LIMIT` (ticket).
+M5: order, knowledge and ticket also get `GRPC_PORT` (50051 / 50052 / 50053), `SERVICE_TOKEN_SECRET` (`${SERVICE_TOKEN_SECRET:?...}`: Compose refuses to start if it is unset or empty) and `GRPC_ALLOWED_CALLERS` (`agent`). The worker gets `GRPC_PORT: 50052`, `SERVICE_TOKEN_SECRET: not-used-by-the-worker` and `GRPC_ALLOWED_CALLERS: none` only because it shares `config.py`; it never starts a gRPC server and never sees the real secret.
+`.env` also holds the three JWT settings above (paths are container paths), `POSTGRES_USER`, `POSTGRES_PASSWORD`, `<SERVICE>_DATABASE_URL` ×5, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`, `OPENAI_API_KEY`, `EMBEDDING_MODEL` (knowledge + worker), `CHAT_MODEL` (not passed to any service yet), `REFUND_AUTO_APPROVE_LIMIT` (ticket), `SERVICE_TOKEN_SECRET` (M5; 64 hex characters from `secrets.token_hex(32)`; `.env.example` has a placeholder).
 
 ## 8. Milestone status
 
@@ -261,7 +324,7 @@ No content updates: delete and re-create a document to change it.
 - [x] M2 Order
 - [x] M3 Ticket
 - [x] M4 Knowledge
-- [ ] M5 gRPC layer
+- [x] M5 gRPC layer
 - [ ] M6 Events and Realtime
 - [ ] M7 Agent RAG
 - [ ] M8 Agent order tools
@@ -337,7 +400,19 @@ Delivered orders have a `BlueDart` shipment (`BD-<number>`, shipped 3 days befor
 - `GET /documents` omits `content`; the single-document, create and re-ingest responses include it.
 - Search responses are wrapped as `{results: [...]}` (room for more fields later; matches a `repeated` field in the M5 `.proto`).
 - The seed script calls `document_service.create_document` (the same code as the API, so it also queues the ingestion); the title is the file's H1 line.
-- `search_service` re-checks query length and `top_k` (BadRequestError, 400) for the future gRPC caller; REST returns 422 before that.
+- `search_service` re-checks query length and `top_k` (BadRequestError, 400) as a backstop; REST (422) and gRPC (`SearchRequest` schema, `INVALID_ARGUMENT`) validate before that.
+- gRPC versions: grpcio 1.85.1 + grpcio-tools 1.85.1 + protobuf 7.35.1 (protobuf pinned to the exact protoc 35.1 gencode version, the oldest runtime the generated code accepts).
+- The gRPC server is started from a FastAPI `lifespan` (an async context manager is what Starlette requires; the calls inside are sync). `server.start()` already serves on gRPC's own thread pool, so no extra `threading.Thread` is needed.
+- `abort_from_error` maps any `ValueError` to `INVALID_ARGUMENT`: that covers Pydantic `ValidationError` and `uuid.UUID(...)` failures without a separate UUID check in every method.
+- Order conversion to proto is written out in both `ListOrders` and `GetOrder` (no `order_to_message` helper), because the milestone allows `abort_from_error` as the only shared helper.
+- `ReturnEligibility.window_days` is a plain `int32` (0 = no window applies) as the milestone listed; `refund_amount` and `days_remaining` are `optional`.
+- `GetTicket` returns the messages inside `Ticket` (`repeated Message messages`), instead of REST's `{ticket, messages}` wrapper.
+- `ReturnRequest.order_number` comes from the validated request (the row stores `order_id`); `Message` over gRPC has no `ticket_id` field (it is the request's ticket).
+- `CreateApproval.action_type` is required over gRPC (an empty string fails `ApprovalCreate`'s `Literal["refund"]`), unlike the REST default.
+- `KnowledgeService.Search` opens no DB session in the servicer: `search_service` → `rag.py` uses the engine directly.
+- `SearchResult.score` is a `double` (a 32-bit `float` would turn 0.6123 into 0.61230000257).
+- Service tokens: missing secret is caught by Compose's `${SERVICE_TOKEN_SECRET:?...}` rather than by code. The allowlists are literal values in `docker-compose.yml` (like `PORT`), not `.env` entries.
+- `grpc_client_check.py` reads `SERVICE_TOKEN_SECRET` by scanning the repo's `.env` (stdlib only) and mints a fresh token per call with PyJWT; it exits with status 1 if any step fails.
 
 ## 10. How to run
 
@@ -361,7 +436,13 @@ docker compose exec knowledge python seed.py     # six policy documents, ingeste
 docker compose logs -f knowledge-worker          # watch the ingestion
 python scripts/check_knowledge_search.py         # on the host, after the documents are ready (standard library only)
 ```
-`.env` needs a real `OPENAI_API_KEY` for ingestion and search. Each service's tables are created by its container's `alembic upgrade head` on startup (PGVector's tables by the knowledge API at startup).
+```bash
+# M5 gRPC, on the host (a venv is easiest: python3 -m venv .venv && source .venv/bin/activate)
+pip install grpcio-tools==1.85.1 grpcio==1.85.1 protobuf==7.35.1 PyJWT==2.15.1
+python scripts/generate_proto.py                 # only after changing a .proto (generated code is committed)
+python scripts/grpc_client_check.py              # needs the stack up and the identity, order, ticket and knowledge seeds
+```
+`.env` needs `SERVICE_TOKEN_SECRET` (M5) and a real `OPENAI_API_KEY` for ingestion and search. Each service's tables are created by its container's `alembic upgrade head` on startup (PGVector's tables by the knowledge API at startup).
 
 ## 11. Known limitations and deviations
 
@@ -387,10 +468,19 @@ python scripts/check_knowledge_search.py         # on the host, after the docume
 - Knowledge: an OpenAI error during `/search` returns a plain 500.
 - Celery runs as root in the container and prints a security warning at startup (harmless here; JSON-only serialization).
 - Message ordering uses `created_at` (transaction time) with `id` as a tie-breaker; two messages in one transaction would have the same timestamp (does not happen through the API).
+- gRPC service tokens use one **shared HS256 secret**: any service holding it could mint a token for any caller name (`sub`), so the allowlist only protects against services that do not have the secret. Asymmetric keys per service would fix this; out of scope.
+- gRPC is plaintext (`add_insecure_port`, no TLS) inside the Docker network; tokens are only protected by the network being private.
+- The gRPC ports are published on the host's `127.0.0.1` for the check script (development only); remove the `ports:` entries in a real deployment.
+- Every server checks `exp` with no clock-skew leeway (all containers share the host clock).
+- gRPC `INVALID_ARGUMENT` details for schema errors are Pydantic's full multi-line message (including a docs URL).
+- The `grpc_client_check.py` deadline step assumes `ListOrders` takes longer than 1 ms end to end (true in practice: it runs SQL queries).
+- Each `grpc_client_check.py` run creates a new ticket for customer1 with two approvals (one pending), which stay in the demo data.
 
 ## 12. Open items for later milestones
 
-- `return_request_id` and `amount` on an approval are supplied by the caller and are **not verified** against the Order service in M3. In M9 the Order service must verify the approval (status, return request ID, amount) with the Ticket service over gRPC before executing a refund.
+- `return_request_id` and `amount` on an approval are supplied by the caller and are **not verified** against the Order service (M3, still true after M5's `CreateApproval`). In M9 the Order service must verify the approval (status, return request ID, amount) with the Ticket service over gRPC before executing a refund.
+- M9: add `GetApproval` to `TicketService` (`ticket.proto`, regenerate) and add `order` to the Ticket server's `GRPC_ALLOWED_CALLERS` (`agent,order`); the order service then needs `SERVICE_TOKEN_SECRET` as a caller.
+- M7/M8: the agent service needs `SERVICE_TOKEN_SECRET`, `grpcio`/`protobuf` at the same pins, its own generated stubs (add `services/agent/app/generated` to `TARGETS` in `generate_proto.py`) and the deadline convention.
 - `assigned_agent_id` is not validated against the Identity service (it is always the caller's own id from the token today).
 - `customer_email` on a ticket is a copy from the token; it is not updated if the user's email changes.
 - M10: a takeover flag on tickets (the AI must not reply when a human has taken over).

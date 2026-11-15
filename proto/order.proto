@@ -1,0 +1,86 @@
+// Order service contract. Money is a string with two decimals ("4500.00"), dates are ISO-8601 strings, ids are strings.
+// The caller (the AI agent) always supplies customer_id; the server only shows that customer's orders.
+syntax = "proto3";
+
+package order;
+
+service OrderService {
+  rpc ListOrders(ListOrdersRequest) returns (ListOrdersResponse);
+  rpc GetOrder(GetOrderRequest) returns (Order);
+  rpc CheckReturnEligibility(CheckReturnEligibilityRequest) returns (ReturnEligibility);
+  rpc CreateReturnRequest(CreateReturnRequestRequest) returns (ReturnRequest);
+}
+
+message ListOrdersRequest {
+  string customer_id = 1;
+}
+
+message ListOrdersResponse {
+  repeated Order orders = 1;
+}
+
+message GetOrderRequest {
+  string order_number = 1;
+  string customer_id = 2;
+}
+
+message CheckReturnEligibilityRequest {
+  string order_number = 1;
+  string order_item_id = 2;
+  string customer_id = 3;
+}
+
+message CreateReturnRequestRequest {
+  string order_number = 1;
+  string order_item_id = 2;
+  string reason = 3;
+  string customer_id = 4;
+}
+
+message OrderItem {
+  string id = 1;
+  string product_name = 2;
+  string category = 3;
+  int32 quantity = 4;
+  string unit_price = 5;
+}
+
+message Shipment {
+  string carrier = 1;
+  string tracking_number = 2;
+  string status = 3;
+  string shipped_on = 4;
+  string estimated_delivery = 5;
+  optional string delivered_on = 6;  // absent until delivered
+}
+
+message Order {
+  string order_number = 1;
+  string customer_id = 2;
+  string status = 3;
+  string total_amount = 4;
+  string ordered_at = 5;
+  repeated OrderItem items = 6;
+  Shipment shipment = 7;  // absent for placed and cancelled orders
+}
+
+// Same shape and reason codes as the REST eligibility result.
+// reason_code: eligible | not_delivered | non_returnable | window_expired | already_requested
+message ReturnEligibility {
+  bool eligible = 1;
+  string reason_code = 2;
+  string reason = 3;
+  optional string refund_amount = 4;  // only when eligible
+  int32 window_days = 5;              // 0 when no window applies (not delivered, non-returnable)
+  optional int32 days_remaining = 6;  // absent when no window applies; 0 when expired
+}
+
+message ReturnRequest {
+  string id = 1;
+  string order_number = 2;
+  string order_item_id = 3;
+  string status = 4;
+  string refund_amount = 5;
+  string reason = 6;
+  string created_at = 7;
+}

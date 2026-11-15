@@ -82,6 +82,14 @@ services:
       RABBITMQ_URL: ${RABBITMQ_URL}
       JWT_PUBLIC_KEY_PATH: ${JWT_PUBLIC_KEY_PATH}
       REFUND_AUTO_APPROVE_LIMIT: ${REFUND_AUTO_APPROVE_LIMIT}
+      GRPC_PORT: 50053
+      # gRPC service tokens: shared HS256 secret (Compose stops if it is missing) and the callers allowed in
+      SERVICE_TOKEN_SECRET: ${SERVICE_TOKEN_SECRET:?set SERVICE_TOKEN_SECRET in .env}
+      GRPC_ALLOWED_CALLERS: agent
+    # gRPC for service-to-service calls; published on localhost ONLY so the host-side client script
+    # (scripts/grpc_client_check.py) can reach it. Development-only: other containers use ticket:50053.
+    ports:
+      - "127.0.0.1:50053:50053"
     # run the migration first, then start the API ($$ stops Compose from replacing PORT itself)
     command: ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port $${PORT}"]
     # only the public key folder: the ticket service must never see the private key
@@ -105,6 +113,14 @@ services:
       REDIS_URL: ${REDIS_URL}
       RABBITMQ_URL: ${RABBITMQ_URL}
       JWT_PUBLIC_KEY_PATH: ${JWT_PUBLIC_KEY_PATH}
+      GRPC_PORT: 50051
+      # gRPC service tokens: shared HS256 secret (Compose stops if it is missing) and the callers allowed in
+      SERVICE_TOKEN_SECRET: ${SERVICE_TOKEN_SECRET:?set SERVICE_TOKEN_SECRET in .env}
+      GRPC_ALLOWED_CALLERS: agent
+    # gRPC for service-to-service calls; published on localhost ONLY so the host-side client script
+    # (scripts/grpc_client_check.py) can reach it. Development-only: other containers use order:50051.
+    ports:
+      - "127.0.0.1:50051:50051"
     # run the migration first, then start the API ($$ stops Compose from replacing PORT itself)
     command: ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port $${PORT}"]
     # only the public key folder: the order service must never see the private key
@@ -130,6 +146,14 @@ services:
       JWT_PUBLIC_KEY_PATH: ${JWT_PUBLIC_KEY_PATH}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL}
+      GRPC_PORT: 50052
+      # gRPC service tokens: shared HS256 secret (Compose stops if it is missing) and the callers allowed in
+      SERVICE_TOKEN_SECRET: ${SERVICE_TOKEN_SECRET:?set SERVICE_TOKEN_SECRET in .env}
+      GRPC_ALLOWED_CALLERS: agent
+    # gRPC for service-to-service calls; published on localhost ONLY so the host-side client script
+    # (scripts/grpc_client_check.py) can reach it. Development-only: other containers use knowledge:50052.
+    ports:
+      - "127.0.0.1:50052:50052"
     # run the migration first, then start the API ($$ stops Compose from replacing PORT itself)
     command: ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port $${PORT}"]
     # only the public key folder: the knowledge service must never see the private key
@@ -153,6 +177,10 @@ services:
       RABBITMQ_URL: ${RABBITMQ_URL}
       # required by the shared config.py; the worker never checks tokens, so the key folder is not mounted
       JWT_PUBLIC_KEY_PATH: ${JWT_PUBLIC_KEY_PATH}
+      # also only required by config.py: the worker never starts the gRPC server, so it gets no real secret
+      GRPC_PORT: 50052
+      SERVICE_TOKEN_SECRET: not-used-by-the-worker
+      GRPC_ALLOWED_CALLERS: none
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL}
     command: ["celery", "-A", "app.celery_app", "worker", "--loglevel=info"]
