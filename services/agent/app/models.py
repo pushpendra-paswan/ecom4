@@ -22,5 +22,7 @@ class AgentRun(Base):
     context_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     reply_message_id: Mapped[uuid.UUID | None] = mapped_column()
     tool_call_count: Mapped[int] = mapped_column(default=0, server_default="0")
+    # Why the AI handed the ticket to a human (escalate_to_human), for staff; None if it did not escalate
+    escalation_reason: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

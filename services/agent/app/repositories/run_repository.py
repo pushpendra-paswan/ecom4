@@ -38,6 +38,7 @@ def update(
     context_until: datetime | None,
     reply_message_id: uuid.UUID | None,
     tool_call_count: int,
+    escalation_reason: str | None,
     finished_at: datetime | None,
 ) -> AgentRun:
     run.status = status
@@ -45,6 +46,7 @@ def update(
     run.context_until = context_until
     run.reply_message_id = reply_message_id
     run.tool_call_count = tool_call_count
+    run.escalation_reason = escalation_reason
     run.finished_at = finished_at
     db.flush()
     return run

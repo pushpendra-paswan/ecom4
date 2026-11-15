@@ -18,5 +18,6 @@ class RunResponse(BaseModel):
     context_until: datetime | None
     reply_message_id: uuid.UUID | None
     tool_call_count: int
+    escalation_reason: str | None
     started_at: datetime
     finished_at: datetime | None

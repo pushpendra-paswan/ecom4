@@ -7,6 +7,7 @@ service TicketService {
   rpc GetTicket(GetTicketRequest) returns (Ticket);
   rpc PostMessage(PostMessageRequest) returns (Message);
   rpc CreateApproval(CreateApprovalRequest) returns (Approval);
+  rpc EscalateTicket(EscalateTicketRequest) returns (Ticket);  // the returned Ticket has no messages
 }
 
 message GetTicketRequest {
@@ -25,6 +26,12 @@ message CreateApprovalRequest {
   string return_request_id = 3;
   string amount = 4;             // > 0, at most two decimals, e.g. "4500.00"
   string summary = 5;            // 1 to 1000 characters
+}
+
+// Sets the ticket to "escalated" so a human takes over. The reason is for logs only; the Ticket service does not store it.
+message EscalateTicketRequest {
+  string ticket_id = 1;
+  string reason = 2;
 }
 
 message Message {

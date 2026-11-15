@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0cticket.proto\x12\x06ticket\"%\n\x10GetTicketRequest\x12\x11\n\tticket_id\x18\x01 \x01(\t\"M\n\x12PostMessageRequest\x12\x11\n\tticket_id\x18\x01 \x01(\t\x12\x13\n\x0bsender_type\x18\x02 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x03 \x01(\t\"{\n\x15\x43reateApprovalRequest\x12\x11\n\tticket_id\x18\x01 \x01(\t\x12\x13\n\x0b\x61\x63tion_type\x18\x02 \x01(\t\x12\x19\n\x11return_request_id\x18\x03 \x01(\t\x12\x0e\n\x06\x61mount\x18\x04 \x01(\t\x12\x0f\n\x07summary\x18\x05 \x01(\t\"u\n\x07Message\x12\n\n\x02id\x18\x01 \x01(\t\x12\x13\n\x0bsender_type\x18\x02 \x01(\t\x12\x16\n\tsender_id\x18\x03 \x01(\tH\x00\x88\x01\x01\x12\x0f\n\x07\x63ontent\x18\x04 \x01(\t\x12\x12\n\ncreated_at\x18\x05 \x01(\tB\x0c\n\n_sender_id\"\xe3\x01\n\x06Ticket\x12\n\n\x02id\x18\x01 \x01(\t\x12\x13\n\x0b\x63ustomer_id\x18\x02 \x01(\t\x12\x16\n\x0e\x63ustomer_email\x18\x03 \x01(\t\x12\x0f\n\x07subject\x18\x04 \x01(\t\x12\x0e\n\x06status\x18\x05 \x01(\t\x12\x1e\n\x11\x61ssigned_agent_id\x18\x06 \x01(\tH\x00\x88\x01\x01\x12\x12\n\ncreated_at\x18\x07 \x01(\t\x12\x12\n\nupdated_at\x18\x08 \x01(\t\x12!\n\x08messages\x18\t \x03(\x0b\x32\x0f.ticket.MessageB\x14\n\x12_assigned_agent_id\"\xb5\x01\n\x08\x41pproval\x12\n\n\x02id\x18\x01 \x01(\t\x12\x11\n\tticket_id\x18\x02 \x01(\t\x12\x13\n\x0b\x61\x63tion_type\x18\x03 \x01(\t\x12\x19\n\x11return_request_id\x18\x04 \x01(\t\x12\x0e\n\x06\x61mount\x18\x05 \x01(\t\x12\x0f\n\x07summary\x18\x06 \x01(\t\x12\x0e\n\x06status\x18\x07 \x01(\t\x12\x15\n\rauto_approved\x18\x08 \x01(\x08\x12\x12\n\ncreated_at\x18\t \x01(\t2\xc5\x01\n\rTicketService\x12\x35\n\tGetTicket\x12\x18.ticket.GetTicketRequest\x1a\x0e.ticket.Ticket\x12:\n\x0bPostMessage\x12\x1a.ticket.PostMessageRequest\x1a\x0f.ticket.Message\x12\x41\n\x0e\x43reateApproval\x12\x1d.ticket.CreateApprovalRequest\x1a\x10.ticket.Approvalb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0cticket.proto\x12\x06ticket\"%\n\x10GetTicketRequest\x12\x11\n\tticket_id\x18\x01 \x01(\t\"M\n\x12PostMessageRequest\x12\x11\n\tticket_id\x18\x01 \x01(\t\x12\x13\n\x0bsender_type\x18\x02 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x03 \x01(\t\"{\n\x15\x43reateApprovalRequest\x12\x11\n\tticket_id\x18\x01 \x01(\t\x12\x13\n\x0b\x61\x63tion_type\x18\x02 \x01(\t\x12\x19\n\x11return_request_id\x18\x03 \x01(\t\x12\x0e\n\x06\x61mount\x18\x04 \x01(\t\x12\x0f\n\x07summary\x18\x05 \x01(\t\":\n\x15\x45scalateTicketRequest\x12\x11\n\tticket_id\x18\x01 \x01(\t\x12\x0e\n\x06reason\x18\x02 \x01(\t\"u\n\x07Message\x12\n\n\x02id\x18\x01 \x01(\t\x12\x13\n\x0bsender_type\x18\x02 \x01(\t\x12\x16\n\tsender_id\x18\x03 \x01(\tH\x00\x88\x01\x01\x12\x0f\n\x07\x63ontent\x18\x04 \x01(\t\x12\x12\n\ncreated_at\x18\x05 \x01(\tB\x0c\n\n_sender_id\"\xe3\x01\n\x06Ticket\x12\n\n\x02id\x18\x01 \x01(\t\x12\x13\n\x0b\x63ustomer_id\x18\x02 \x01(\t\x12\x16\n\x0e\x63ustomer_email\x18\x03 \x01(\t\x12\x0f\n\x07subject\x18\x04 \x01(\t\x12\x0e\n\x06status\x18\x05 \x01(\t\x12\x1e\n\x11\x61ssigned_agent_id\x18\x06 \x01(\tH\x00\x88\x01\x01\x12\x12\n\ncreated_at\x18\x07 \x01(\t\x12\x12\n\nupdated_at\x18\x08 \x01(\t\x12!\n\x08messages\x18\t \x03(\x0b\x32\x0f.ticket.MessageB\x14\n\x12_assigned_agent_id\"\xb5\x01\n\x08\x41pproval\x12\n\n\x02id\x18\x01 \x01(\t\x12\x11\n\tticket_id\x18\x02 \x01(\t\x12\x13\n\x0b\x61\x63tion_type\x18\x03 \x01(\t\x12\x19\n\x11return_request_id\x18\x04 \x01(\t\x12\x0e\n\x06\x61mount\x18\x05 \x01(\t\x12\x0f\n\x07summary\x18\x06 \x01(\t\x12\x0e\n\x06status\x18\x07 \x01(\t\x12\x15\n\rauto_approved\x18\x08 \x01(\x08\x12\x12\n\ncreated_at\x18\t \x01(\t2\x86\x02\n\rTicketService\x12\x35\n\tGetTicket\x12\x18.ticket.GetTicketRequest\x1a\x0e.ticket.Ticket\x12:\n\x0bPostMessage\x12\x1a.ticket.PostMessageRequest\x1a\x0f.ticket.Message\x12\x41\n\x0e\x43reateApproval\x12\x1d.ticket.CreateApprovalRequest\x1a\x10.ticket.Approval\x12?\n\x0e\x45scalateTicket\x12\x1d.ticket.EscalateTicketRequest\x1a\x0e.ticket.Ticketb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -37,12 +37,14 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_POSTMESSAGEREQUEST']._serialized_end=140
   _globals['_CREATEAPPROVALREQUEST']._serialized_start=142
   _globals['_CREATEAPPROVALREQUEST']._serialized_end=265
-  _globals['_MESSAGE']._serialized_start=267
-  _globals['_MESSAGE']._serialized_end=384
-  _globals['_TICKET']._serialized_start=387
-  _globals['_TICKET']._serialized_end=614
-  _globals['_APPROVAL']._serialized_start=617
-  _globals['_APPROVAL']._serialized_end=798
-  _globals['_TICKETSERVICE']._serialized_start=801
-  _globals['_TICKETSERVICE']._serialized_end=998
+  _globals['_ESCALATETICKETREQUEST']._serialized_start=267
+  _globals['_ESCALATETICKETREQUEST']._serialized_end=325
+  _globals['_MESSAGE']._serialized_start=327
+  _globals['_MESSAGE']._serialized_end=444
+  _globals['_TICKET']._serialized_start=447
+  _globals['_TICKET']._serialized_end=674
+  _globals['_APPROVAL']._serialized_start=677
+  _globals['_APPROVAL']._serialized_end=858
+  _globals['_TICKETSERVICE']._serialized_start=861
+  _globals['_TICKETSERVICE']._serialized_end=1123
 # @@protoc_insertion_point(module_scope)

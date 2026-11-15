@@ -3,7 +3,7 @@
 #   python scripts/grpc_client_check.py
 # Needs grpcio, protobuf and PyJWT (see README); uses the generated stubs in scripts/generated/.
 # Every call sends a fresh service token signed as "agent" with SERVICE_TOKEN_SECRET from the repo's .env.
-# Prints one PASS/FAIL line per step and a summary. Safe to run again: it creates a new ticket and new approvals each time.
+# Prints one PASS/FAIL line per step and a summary. Safe to run again: it creates two new tickets and new approvals each time.
 import json
 import pathlib
 import time
@@ -306,9 +306,31 @@ try:
 except grpc.RpcError as error:
     report(step, error.code() == grpc.StatusCode.ALREADY_EXISTS, f"{error.code().name}: {error.details()}")
 
+# Step 17: a fresh ticket (created over REST like in step 9) can be escalated to a human
+step = "EscalateTicket on a fresh ticket -> status escalated"
+try:
+    ticket_body = json.dumps({"subject": "gRPC check: escalation", "message": "Please let a human look at this (grpc_client_check.py)"}).encode()
+    ticket_request = urllib.request.Request(
+        f"{BASE_URL}/api/tickets/tickets",
+        data=ticket_body,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {access_token}"},
+    )
+    with urllib.request.urlopen(ticket_request, timeout=DEFAULT_TIMEOUT) as response:
+        escalation_ticket_id = json.load(response)["ticket"]["id"]
+    ticket = ticket_stub.EscalateTicket(
+        ticket_pb2.EscalateTicketRequest(ticket_id=escalation_ticket_id, reason="grpc_client_check: customer asked for a human"),
+        timeout=DEFAULT_TIMEOUT,
+        metadata=agent_metadata(),
+    )
+    report(step, ticket.id == escalation_ticket_id and ticket.status == "escalated", f"ticket {ticket.id}: {ticket.status}")
+except (urllib.error.URLError, KeyError, NameError) as error:
+    report(step, False, str(error))
+except grpc.RpcError as error:
+    report(step, False, f"{error.code().name}: {error.details()}")
+
 print("--- Deadlines and validation ---")
 
-# Step 17: a 1 millisecond deadline is too short for any real call
+# Step 18: a 1 millisecond deadline is too short for any real call
 step = "ListOrders with a 1 ms deadline -> DEADLINE_EXCEEDED"
 try:
     order_stub.ListOrders(
@@ -318,7 +340,7 @@ try:
 except grpc.RpcError as error:
     report(step, error.code() == grpc.StatusCode.DEADLINE_EXCEEDED, error.code().name)
 
-# Step 18: customer_id is required
+# Step 19: customer_id is required
 step = "GetOrder with an empty customer_id -> INVALID_ARGUMENT"
 try:
     order_stub.GetOrder(order_pb2.GetOrderRequest(order_number="ORD-1001", customer_id=""), timeout=DEFAULT_TIMEOUT, metadata=agent_metadata())
@@ -326,7 +348,7 @@ try:
 except grpc.RpcError as error:
     report(step, error.code() == grpc.StatusCode.INVALID_ARGUMENT, f"{error.code().name}: {error.details()}")
 
-# Step 19: customer_id must be a UUID
+# Step 20: customer_id must be a UUID
 step = "GetOrder with a malformed customer_id -> INVALID_ARGUMENT"
 try:
     order_stub.GetOrder(
@@ -341,7 +363,7 @@ except grpc.RpcError as error:
 print("--- Service tokens ---")
 list_orders_request = order_pb2.ListOrdersRequest(customer_id=CUSTOMER1_ID)
 
-# Step 20: no token at all
+# Step 21: no token at all
 step = "ListOrders without a token -> UNAUTHENTICATED"
 try:
     order_stub.ListOrders(list_orders_request, timeout=DEFAULT_TIMEOUT)
@@ -349,7 +371,7 @@ try:
 except grpc.RpcError as error:
     report(step, error.code() == grpc.StatusCode.UNAUTHENTICATED, f"{error.code().name}: {error.details()}")
 
-# Step 21: something that is not a JWT
+# Step 22: something that is not a JWT
 step = "ListOrders with a garbage token -> UNAUTHENTICATED"
 try:
     order_stub.ListOrders(
@@ -359,7 +381,7 @@ try:
 except grpc.RpcError as error:
     report(step, error.code() == grpc.StatusCode.UNAUTHENTICATED, f"{error.code().name}: {error.details()}")
 
-# Step 22: a well-formed token signed with another secret
+# Step 23: a well-formed token signed with another secret
 step = "ListOrders with a token signed with the wrong secret -> UNAUTHENTICATED"
 issued_at = int(time.time())
 wrong_secret_token = jwt.encode(
@@ -375,7 +397,7 @@ try:
 except grpc.RpcError as error:
     report(step, error.code() == grpc.StatusCode.UNAUTHENTICATED, f"{error.code().name}: {error.details()}")
 
-# Step 23: a correctly signed token that expired a minute ago
+# Step 24: a correctly signed token that expired a minute ago
 step = "ListOrders with an expired token -> UNAUTHENTICATED"
 issued_at = int(time.time()) - 120
 expired_token = jwt.encode(
@@ -391,7 +413,7 @@ try:
 except grpc.RpcError as error:
     report(step, error.code() == grpc.StatusCode.UNAUTHENTICATED, f"{error.code().name}: {error.details()}")
 
-# Step 24: a valid token, but the order service is not on the order server's allowlist
+# Step 25: a valid token, but the order service is not on the order server's allowlist
 step = "ListOrders with a valid token for sub=order -> PERMISSION_DENIED"
 issued_at = int(time.time())
 order_token = jwt.encode(
@@ -407,7 +429,7 @@ try:
 except grpc.RpcError as error:
     report(step, error.code() == grpc.StatusCode.PERMISSION_DENIED, f"{error.code().name}: {error.details()}")
 
-# Step 25: print the summary (and the ticket id, for the database check of the two approvals)
+# Step 26: print the summary (and the ticket id, for the database check of the two approvals)
 print()
 print(f"Ticket created by this run: {ticket_id}")
 print(f"Summary: {sum(step_results)}/{len(step_results)} steps passed")

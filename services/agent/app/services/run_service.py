@@ -37,7 +37,7 @@ def process_customer_message(db: Session, ticket_id: uuid.UUID, message_id: uuid
         if message["id"] == str(message_id):
             trigger_message = message
     if trigger_message is None:
-        run_repository.update(db, run, "skipped", "message_not_found", None, None, 0, datetime.now(timezone.utc))
+        run_repository.update(db, run, "skipped", "message_not_found", None, None, 0, None, datetime.now(timezone.utc))
         db.commit()
         logger.warning("Run %s skipped: message %s is not on ticket %s", run.id, message_id, ticket_id)
         return
@@ -59,7 +59,7 @@ def process_customer_message(db: Session, ticket_id: uuid.UUID, message_id: uuid
     if skip_reason is None and ticket["status"] == "escalated":
         skip_reason = "ticket_escalated"
     if skip_reason is not None:
-        run_repository.update(db, run, "skipped", skip_reason, None, None, 0, datetime.now(timezone.utc))
+        run_repository.update(db, run, "skipped", skip_reason, None, None, 0, None, datetime.now(timezone.utc))
         db.commit()
         logger.info("Run %s for message %s skipped: %s", run.id, message_id, skip_reason)
         return
@@ -76,7 +76,7 @@ def process_customer_message(db: Session, ticket_id: uuid.UUID, message_id: uuid
         mark_run_failed(db, ticket_id, message_id, "step_limit")
         return
 
-    # Step 6: record the answer
+    # Step 6: record the answer (and the escalation reason, if the AI handed the ticket to a human)
     run_repository.update(
         db,
         run,
@@ -85,12 +85,15 @@ def process_customer_message(db: Session, ticket_id: uuid.UUID, message_id: uuid
         datetime.fromisoformat(result["context_until"]),
         uuid.UUID(result["reply_message_id"]),
         result["tool_call_count"],
+        result["escalation_reason"],
         datetime.now(timezone.utc),
     )
     db.commit()
     logger.info(
         "Run %s completed: reply %s, %d tool call(s)", run.id, result["reply_message_id"], result["tool_call_count"]
     )
+    if result["escalation_reason"] is not None:
+        logger.info("Run %s escalated ticket %s: %s", run.id, ticket_id, result["escalation_reason"])
 
 
 # Final failure: post ONE fallback message on the ticket and mark the run failed with the error.
@@ -117,7 +120,15 @@ def mark_run_failed(db: Session, ticket_id: uuid.UUID, message_id: uuid.UUID, er
 
     # Step 3: mark the run failed
     run_repository.update(
-        db, run, "failed", note, run.context_until, reply_message_id, run.tool_call_count, datetime.now(timezone.utc)
+        db,
+        run,
+        "failed",
+        note,
+        run.context_until,
+        reply_message_id,
+        run.tool_call_count,
+        run.escalation_reason,
+        datetime.now(timezone.utc),
     )
     db.commit()
     logger.error("Run %s for message %s failed: %s", run.id, message_id, note)

@@ -58,6 +58,20 @@ python scripts/check_agent_answers.py   # on the host (standard library only): 8
 
 Staff can see every run (answered, skipped, failed) at `GET /api/agent/runs` (Swagger: `/api/agent/docs`).
 
+## AI agent order tools (M8)
+
+The agent can list a customer's orders, show one order with tracking, check whether an item can be returned, start
+a return when the customer clearly asks, and hand the ticket to a human (`escalated`). The customer is always the
+ticket's customer, injected by code; the model never chooses it.
+
+The demo orders' dates are fixed when the order seed first runs, so return windows expire as days pass. Refresh them
+(this deletes and recreates only the ten demo orders, with their shipments, return requests and refunds; item ids change):
+
+```bash
+docker compose exec order python seed.py --reset
+python scripts/check_agent_orders.py    # on the host (standard library only): 10 order scenarios with PASS/FAIL
+```
+
 ## URLs
 
 | What | URL |

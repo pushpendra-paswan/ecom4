@@ -1,12 +1,18 @@
 # Demo orders for the fixed demo customers created by the identity seed.
-# Run with: docker compose exec order python seed.py   (safe to run again)
-# Dates are relative to the day the seed runs, so re-seed on a fresh database if the days matter.
+# Run with: docker compose exec order python seed.py           (safe to run again; existing orders are skipped)
+#      or:  docker compose exec order python seed.py --reset   (deletes the ten demo orders with their shipments,
+#           return requests and refunds, then creates them again with dates relative to today)
+# Dates are relative to the day the seed runs, so return windows expire as the days pass: use --reset to refresh them.
+# --reset gives the items new ids. Only the ten demo order numbers are touched.
+import sys
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 
+from sqlalchemy import delete, select
+
 from app.database import SessionLocal
-from app.models import Order, OrderItem, ReturnRequest, Shipment
+from app.models import Order, OrderItem, Refund, ReturnRequest, Shipment
 from app.repositories import order_repository
 
 CUSTOMER_1 = uuid.UUID("00000000-0000-0000-0000-000000000101")
@@ -67,7 +73,24 @@ today = date.today()
 # Step 1: open a database session
 db = SessionLocal()
 
-# Step 2: create each demo order unless the order number already exists
+# Step 2 (only with --reset): delete the demo orders and everything that points at them, children first,
+# in one transaction
+if "--reset" in sys.argv[1:]:
+    demo_order_numbers = [demo_order["order_number"] for demo_order in DEMO_ORDERS]
+    order_ids = list(db.scalars(select(Order.id).where(Order.order_number.in_(demo_order_numbers))))
+    return_request_ids = list(db.scalars(select(ReturnRequest.id).where(ReturnRequest.order_id.in_(order_ids))))
+    refund_result = db.execute(delete(Refund).where(Refund.return_request_id.in_(return_request_ids)))
+    return_result = db.execute(delete(ReturnRequest).where(ReturnRequest.id.in_(return_request_ids)))
+    db.execute(delete(Shipment).where(Shipment.order_id.in_(order_ids)))
+    db.execute(delete(OrderItem).where(OrderItem.order_id.in_(order_ids)))
+    db.execute(delete(Order).where(Order.id.in_(order_ids)))
+    db.commit()
+    print(
+        f"reset    deleted {len(order_ids)} demo orders, {return_result.rowcount} return requests "
+        f"and {refund_result.rowcount} refunds"
+    )
+
+# Step 3: create each demo order unless the order number already exists
 for demo_order in DEMO_ORDERS:
     order_number = demo_order["order_number"]
     if order_repository.get_by_order_number(db, order_number) is not None:
@@ -75,7 +98,7 @@ for demo_order in DEMO_ORDERS:
         skipped_count += 1
         continue
 
-    # Step 3: work out the dates from the status
+    # Step 4: work out the dates from the status
     if demo_order["status"] == "delivered":
         delivered_on = today - timedelta(days=demo_order["delivered_days_ago"])
         shipped_on = delivered_on - timedelta(days=3)
@@ -88,7 +111,7 @@ for demo_order in DEMO_ORDERS:
     else:
         ordered_on = today - timedelta(days=6)
 
-    # Step 4: create the order with its items
+    # Step 5: create the order with its items
     total_amount = sum(Decimal(unit_price) for _, _, unit_price in demo_order["items"])
     order = Order(
         order_number=order_number,
@@ -102,7 +125,7 @@ for demo_order in DEMO_ORDERS:
         ],
     )
 
-    # Step 5: delivered and shipped orders have one shipment (placed and cancelled orders have none)
+    # Step 6: delivered and shipped orders have one shipment (placed and cancelled orders have none)
     if demo_order["status"] == "delivered":
         order.shipment = Shipment(
             carrier="BlueDart", tracking_number=f"BD-{order_number[4:]}", status="delivered",
@@ -114,11 +137,11 @@ for demo_order in DEMO_ORDERS:
             shipped_on=shipped_on, estimated_delivery=today + timedelta(days=3), delivered_on=None,
         )
 
-    # Step 6: save the order (flush gives the order and its items their ids)
+    # Step 7: save the order (flush gives the order and its items their ids)
     db.add(order)
     db.flush()
 
-    # Step 7: ORD-1007 starts with a return request already open for its only item
+    # Step 8: ORD-1007 starts with a return request already open for its only item
     if "return_reason" in demo_order:
         item = order.items[0]
         db.add(ReturnRequest(
@@ -130,6 +153,6 @@ for demo_order in DEMO_ORDERS:
     print(f"created  {order_number} ({demo_order['status']})")
     created_count += 1
 
-# Step 8: close the session and print a summary
+# Step 9: close the session and print a summary
 db.close()
 print(f"Done: {created_count} created, {skipped_count} skipped.")

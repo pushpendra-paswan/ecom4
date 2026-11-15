@@ -14,12 +14,12 @@ class Settings(BaseSettings):
     chat_model: str
     # Shared HS256 secret for the service tokens this service sends on its gRPC calls
     service_token_secret: str
-    # gRPC servers this service calls (the order address is unused until M8)
+    # gRPC servers this service calls
     knowledge_grpc_address: str = "knowledge:50052"
     ticket_grpc_address: str = "ticket:50053"
     order_grpc_address: str = "order:50051"
-    # Hard step limit for one graph run, and how many ticket messages the agent reads
-    agent_recursion_limit: int = 10
+    # Hard step limit for one graph run (16 = about six tool rounds), and how many ticket messages the agent reads
+    agent_recursion_limit: int = 16
     agent_history_limit: int = 20
 
 

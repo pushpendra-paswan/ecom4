@@ -139,6 +139,34 @@ class TicketServicer(ticket_pb2_grpc.TicketServiceServicer):
         finally:
             db.close()
 
+    def EscalateTicket(self, request, context):
+        db = SessionLocal()
+        try:
+            # Step 1: validate the input
+            ticket_id = uuid.UUID(request.ticket_id)
+
+            # Step 2: call the same service function as the staff REST route. It publishes ticket.status_changed
+            # only when the status really changes, so escalating an escalated ticket again changes nothing.
+            # The reason is only logged here, not stored (the agent service records it on its run).
+            ticket = ticket_service.update_status(db, ticket_id, "escalated")
+            logger.info("Ticket %s escalated over gRPC: %s", ticket.id, request.reason)
+
+            # Step 3: convert to proto (without the messages; GetTicket returns those)
+            return ticket_pb2.Ticket(
+                id=str(ticket.id),
+                customer_id=str(ticket.customer_id),
+                customer_email=ticket.customer_email,
+                subject=ticket.subject,
+                status=ticket.status,
+                assigned_agent_id=str(ticket.assigned_agent_id) if ticket.assigned_agent_id else None,
+                created_at=ticket.created_at.isoformat(),
+                updated_at=ticket.updated_at.isoformat(),
+            )
+        except Exception as error:
+            abort_from_error(context, error)
+        finally:
+            db.close()
+
 
 # Checks the service token on every call before any servicer code runs.
 # The caller sends "authorization: Bearer <token>", an HS256 JWT signed with SERVICE_TOKEN_SECRET with

@@ -49,6 +49,11 @@ class TicketServiceStub:
                 request_serializer=ticket__pb2.CreateApprovalRequest.SerializeToString,
                 response_deserializer=ticket__pb2.Approval.FromString,
                 _registered_method=True)
+        self.EscalateTicket = channel.unary_unary(
+                '/ticket.TicketService/EscalateTicket',
+                request_serializer=ticket__pb2.EscalateTicketRequest.SerializeToString,
+                response_deserializer=ticket__pb2.Ticket.FromString,
+                _registered_method=True)
 
 
 class TicketServiceServicer:
@@ -72,6 +77,13 @@ class TicketServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def EscalateTicket(self, request, context):
+        """the returned Ticket has no messages
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_TicketServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -89,6 +101,11 @@ def add_TicketServiceServicer_to_server(servicer, server):
                     servicer.CreateApproval,
                     request_deserializer=ticket__pb2.CreateApprovalRequest.FromString,
                     response_serializer=ticket__pb2.Approval.SerializeToString,
+            ),
+            'EscalateTicket': grpc.unary_unary_rpc_method_handler(
+                    servicer.EscalateTicket,
+                    request_deserializer=ticket__pb2.EscalateTicketRequest.FromString,
+                    response_serializer=ticket__pb2.Ticket.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -172,6 +189,33 @@ class TicketService:
             '/ticket.TicketService/CreateApproval',
             ticket__pb2.CreateApprovalRequest.SerializeToString,
             ticket__pb2.Approval.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def EscalateTicket(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ticket.TicketService/EscalateTicket',
+            ticket__pb2.EscalateTicketRequest.SerializeToString,
+            ticket__pb2.Ticket.FromString,
             options,
             channel_credentials,
             insecure,
