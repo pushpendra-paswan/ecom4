@@ -72,6 +72,39 @@ def update(
     return run
 
 
+# M10: the AI activity log of a run (see models.AgentRun). Saved together with update() before the commit.
+def save_activity(
+    db: Session,
+    run: AgentRun,
+    tool_calls: list[dict],
+    retrieved_chunks: list[dict],
+    reply_text: str | None,
+    model_name: str | None,
+    input_tokens: int,
+    output_tokens: int,
+    duration_ms: int | None,
+) -> AgentRun:
+    run.tool_calls = tool_calls
+    run.retrieved_chunks = retrieved_chunks
+    run.reply_text = reply_text
+    run.model_name = model_name
+    run.input_tokens = input_tokens
+    run.output_tokens = output_tokens
+    run.duration_ms = duration_ms
+    db.flush()
+    return run
+
+
+def get_by_id(db: Session, run_id: uuid.UUID) -> AgentRun | None:
+    return db.scalar(select(AgentRun).where(AgentRun.id == run_id))
+
+
+# M10: every run of one ticket, oldest first (the AI activity log of the ticket)
+def list_for_ticket_oldest_first(db: Session, ticket_id: uuid.UUID) -> list[AgentRun]:
+    query = select(AgentRun).where(AgentRun.ticket_id == ticket_id).order_by(AgentRun.started_at, AgentRun.id)
+    return list(db.scalars(query))
+
+
 # Both filters are optional; newest first, at most `limit` rows
 def list_runs(db: Session, ticket_id: uuid.UUID | None, status: str | None, limit: int) -> list[AgentRun]:
     query = select(AgentRun).order_by(AgentRun.started_at.desc()).limit(limit)

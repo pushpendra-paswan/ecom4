@@ -58,6 +58,8 @@ message Ticket {
   string created_at = 7;
   string updated_at = 8;
   repeated Message messages = 9;
+  optional string taken_over_by = 10;     // M10: the staff member who took over (absent while the AI may answer)
+  optional string taken_over_at = 11;     // M10: when they took over (absent while not taken over)
 }
 
 message Approval {

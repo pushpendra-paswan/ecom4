@@ -87,11 +87,13 @@ def get_ticket(ticket_id: str) -> dict:
         "customer_id": ticket.customer_id,
         "subject": ticket.subject,
         "status": ticket.status,
+        "taken_over_by": ticket.taken_over_by if ticket.HasField("taken_over_by") else None,
         "messages": messages,
     }
 
 
-# Posts a message as "ai" or "system" and returns it
+# Posts a message as "ai" or "system" and returns it. M10: an "ai" message on a ticket a human has taken over is
+# rejected by the Ticket service (ALREADY_EXISTS), which arrives here as a ToolCallError
 def post_message(ticket_id: str, sender_type: str, content: str) -> dict:
     global ticket_stub
 
@@ -240,6 +242,7 @@ def search_knowledge(query: str, top_k: int) -> list[dict]:
     results = []
     for result in response.results:
         results.append({
+            "document_id": result.document_id,
             "title": result.title,
             "section": result.section,
             "content": result.content,

@@ -11,6 +11,10 @@
 #
 # Entry points (called by run_service): run_agent(ticket_id) and resume_agent(ticket_id, approval_id).
 # The node functions below are graph entry points.
+#
+# M10: if a human takes over the ticket while a run is working, the Ticket service rejects the run's "ai" message.
+# post_reply and announce_decision then keep the text in reply_text, set reply_discarded and let the run finish
+# normally. run_agent also returns the AI activity log for the run (tool calls, retrieved chunks, tokens).
 import logging
 from decimal import Decimal
 from typing import Annotated, TypedDict
@@ -29,7 +33,7 @@ from psycopg_pool import ConnectionPool
 
 from app.agent import clients
 from app.agent.prompts import REFUND_APPROVED_MESSAGE, REFUND_REJECTED_MESSAGE, SYSTEM_PROMPT
-from app.agent.tools import TOOLS
+from app.agent.tools import TOOL_TIERS, TOOLS
 from app.config import settings
 from app.errors import ToolCallError
 
@@ -42,6 +46,8 @@ MODEL_MAX_RETRIES = 2
 # The Ticket service accepts messages of at most 5000 characters
 MAX_REPLY_LENGTH = 5000
 CHECKPOINT_POOL_MAX_SIZE = 2
+# M10: tool results in the activity log are cut to this many characters
+MAX_LOGGED_RESULT_LENGTH = 2000
 
 
 class AgentState(TypedDict):
@@ -61,6 +67,12 @@ class AgentState(TypedDict):
     pending_approval_id: str | None
     # M9: the value the thread was resumed with: {"approval_id": ...}
     approval_decision: dict | None
+    # M10: how many ticket messages load_context put into "messages"; everything after them was added by this run
+    history_count: int
+    # M10: the text post_reply or announce_decision posted (or tried to post), and whether the Ticket service
+    # rejected it because a human had taken over the ticket in the meantime
+    reply_text: str | None
+    reply_discarded: bool
 
 
 # Built on first use, once per process (see run_agent). Never at import time: Celery imports this module
@@ -101,6 +113,9 @@ def load_context(state: AgentState) -> dict:
         "escalation_reason": None,
         "pending_approval_id": None,
         "approval_decision": None,
+        "history_count": len(history),
+        "reply_text": None,
+        "reply_discarded": False,
     }
 
 
@@ -131,8 +146,19 @@ def post_reply(state: AgentState) -> dict:
     if not content:
         content = FALLBACK_MESSAGE
 
-    # Step 2: post it through the Ticket service, which publishes ticket.message_created for the browsers
-    message = clients.post_message(state["ticket_id"], "ai", content[:MAX_REPLY_LENGTH])
+    # Step 2: post it through the Ticket service, which publishes ticket.message_created for the browsers.
+    # M10: if a human took over the ticket while this run was working, the Ticket service rejects the message
+    # (ToolCallError). The reply is then discarded (kept only in reply_text) and the run finishes normally.
+    # Any other error propagates as before.
+    reply_text = content[:MAX_REPLY_LENGTH]
+    reply_message_id = None
+    reply_discarded = False
+    try:
+        message = clients.post_message(state["ticket_id"], "ai", reply_text)
+        reply_message_id = message["id"]
+    except ToolCallError as error:
+        logger.warning("Ticket %s: reply discarded, the Ticket service rejected it: %s", state["ticket_id"], error)
+        reply_discarded = True
 
     # Step 3: did the model escalate in this run? load_context replaced the old messages with the ticket's
     # messages (which carry no tool calls), so every tool call in the state is from this run; the last one counts.
@@ -152,7 +178,9 @@ def post_reply(state: AgentState) -> dict:
             if isinstance(artifact, dict) and artifact.get("status") == "pending":
                 pending_approval_id = artifact["approval_id"]
     return {
-        "reply_message_id": message["id"],
+        "reply_message_id": reply_message_id,
+        "reply_text": reply_text,
+        "reply_discarded": reply_discarded,
         "escalation_reason": escalation_reason,
         "pending_approval_id": pending_approval_id,
     }
@@ -183,7 +211,7 @@ def announce_decision(state: AgentState) -> dict:
             resumed_approval_id,
             state["pending_approval_id"],
         )
-        return {"reply_message_id": None}
+        return {"reply_message_id": None, "reply_text": None, "reply_discarded": False}
 
     # Step 2: read the decision from the Ticket service (the source of truth)
     approval = clients.get_approval(state["pending_approval_id"])
@@ -197,9 +225,23 @@ def announce_decision(state: AgentState) -> dict:
         decision_note = (approval["decision_note"] or "No reason was given").strip().rstrip(".")
         content = REFUND_REJECTED_MESSAGE.format(summary=approval["summary"], decision_note=decision_note)
 
-    # Step 4: post it as an ai message and stop waiting
-    message = clients.post_message(state["ticket_id"], "ai", content[:MAX_REPLY_LENGTH])
-    return {"reply_message_id": message["id"], "pending_approval_id": None}
+    # Step 4: post it as an ai message and stop waiting. M10: a ticket a human has taken over rejects it
+    # (ToolCallError); the outcome is then discarded (kept only in reply_text) and the human tells the customer.
+    reply_text = content[:MAX_REPLY_LENGTH]
+    reply_message_id = None
+    reply_discarded = False
+    try:
+        message = clients.post_message(state["ticket_id"], "ai", reply_text)
+        reply_message_id = message["id"]
+    except ToolCallError as error:
+        logger.warning("Ticket %s: outcome message discarded, the Ticket service rejected it: %s", state["ticket_id"], error)
+        reply_discarded = True
+    return {
+        "reply_message_id": reply_message_id,
+        "reply_text": reply_text,
+        "reply_discarded": reply_discarded,
+        "pending_approval_id": None,
+    }
 
 
 # Builds the model, the checkpointer and the compiled graph on the first call in each process, then returns the
@@ -255,7 +297,9 @@ def get_compiled_graph() -> CompiledStateGraph:
 
 
 # Runs the graph for one customer message and returns what the run service records. paused_for_approval_id is set
-# when the run ended paused in wait_for_approval (a refund waits for a human).
+# when the run ended paused in wait_for_approval (a refund waits for a human). M10: also returns the activity log
+# of the run (tool_calls, retrieved_chunks, reply_text, model_name, input_tokens, output_tokens) and
+# reply_discarded.
 def run_agent(ticket_id: str) -> dict:
     # Step 1: the compiled graph (built on the first run in this process)
     graph = get_compiled_graph()
@@ -270,19 +314,81 @@ def run_agent(ticket_id: str) -> dict:
     if "__interrupt__" in final_state:
         paused_for_approval_id = final_state["pending_approval_id"]
 
-    # Step 4: return what the run service records
+    # Step 4 (M10): the messages this run added are exactly the ones after the history load_context loaded
+    run_messages = final_state["messages"][final_state["history_count"]:]
+
+    # Step 5: index this run's tool results by tool_call_id, so each tool call of the model finds its result
+    tool_messages = {}
+    for message in run_messages:
+        if isinstance(message, ToolMessage):
+            tool_messages[message.tool_call_id] = message
+
+    # Step 6: walk the model's responses in order. Each response is one step: add up its token usage, and log every
+    # tool call it asked for with its tier and result. The arguments are what the model sent; the injected
+    # customer_id and ticket_id are added later by the ToolNode, so they never appear here.
+    tool_calls = []
+    retrieved_chunks = []
+    model_name = None
+    input_tokens = 0
+    output_tokens = 0
+    step = 0
+    for message in run_messages:
+        if not isinstance(message, AIMessage):
+            continue
+        step += 1
+        model_name = message.response_metadata.get("model_name") or settings.chat_model
+        if message.usage_metadata:
+            input_tokens += message.usage_metadata.get("input_tokens", 0)
+            output_tokens += message.usage_metadata.get("output_tokens", 0)
+        for tool_call in message.tool_calls:
+            tool_message = tool_messages.get(tool_call["id"])
+            result = None
+            is_error = False
+            if tool_message is not None:
+                result = tool_message.text[:MAX_LOGGED_RESULT_LENGTH]
+                is_error = tool_message.status == "error"
+            tool_calls.append({
+                "step": step,
+                "tool": tool_call["name"],
+                "tier": TOOL_TIERS.get(tool_call["name"]),
+                "arguments": tool_call["args"],
+                "result": result,
+                "is_error": is_error,
+            })
+
+            # Step 7: a knowledge-base search carries its raw results (with scores) in the ToolMessage artifact
+            if tool_call["name"] == "search_knowledge_base" and tool_message is not None:
+                if isinstance(tool_message.artifact, list):
+                    for chunk in tool_message.artifact:
+                        retrieved_chunks.append({
+                            "query": tool_call["args"].get("query"),
+                            "document_id": chunk["document_id"],
+                            "title": chunk["title"],
+                            "section": chunk["section"],
+                            "score": chunk["score"],
+                        })
+
+    # Step 8: return what the run service records
     return {
         "context_until": final_state["context_until"],
         "reply_message_id": final_state["reply_message_id"],
+        "reply_text": final_state["reply_text"],
+        "reply_discarded": final_state["reply_discarded"],
         "tool_call_count": final_state["tool_call_count"],
         "escalation_reason": final_state["escalation_reason"],
         "paused_for_approval_id": paused_for_approval_id,
+        "tool_calls": tool_calls,
+        "retrieved_chunks": retrieved_chunks,
+        "model_name": model_name,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
     }
 
 
-# Resumes a thread that is paused for this approval and returns {"resumed": True, "reply_message_id": ...}, or
-# {"resumed": False, "reply_message_id": None} when the thread is not waiting for it (an approval created over REST,
-# a duplicate event, or an approval the thread no longer waits for).
+# Resumes a thread that is paused for this approval and returns {"resumed": True, "reply_message_id", "reply_text",
+# "reply_discarded"}, or "resumed": False when the thread is not waiting for it (an approval created over REST,
+# a duplicate event, or an approval the thread no longer waits for). M10: reply_discarded is True when the outcome
+# message was rejected because a human had taken over the ticket.
 def resume_agent(ticket_id: str, approval_id: str) -> dict:
     # Step 1: the compiled graph and the thread's saved state
     graph = get_compiled_graph()
@@ -307,10 +413,15 @@ def resume_agent(ticket_id: str, approval_id: str) -> dict:
     elif retrying_announcement:
         final_state = graph.invoke(None, config)
     else:
-        return {"resumed": False, "reply_message_id": None}
+        return {"resumed": False, "reply_message_id": None, "reply_text": None, "reply_discarded": False}
 
-    # Step 5: the outcome message posted by announce_decision
+    # Step 5: the outcome message posted (or discarded) by announce_decision
     logger.info(
         "Ticket %s resumed for approval %s, outcome message %s", ticket_id, approval_id, final_state["reply_message_id"]
     )
-    return {"resumed": final_state["reply_message_id"] is not None, "reply_message_id": final_state["reply_message_id"]}
+    return {
+        "resumed": final_state["reply_message_id"] is not None or final_state["reply_discarded"],
+        "reply_message_id": final_state["reply_message_id"],
+        "reply_text": final_state["reply_text"],
+        "reply_discarded": final_state["reply_discarded"],
+    }

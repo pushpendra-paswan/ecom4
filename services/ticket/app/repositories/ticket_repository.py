@@ -22,6 +22,16 @@ def get_by_id(db: Session, ticket_id: uuid.UUID, customer_id: uuid.UUID | None =
     return db.scalar(query)
 
 
+# M10: the same lookup, but it also locks the ticket row until the transaction ends (SELECT ... FOR UPDATE).
+# Adding a message, taking over and releasing all use it, so they run one after another on the same ticket:
+# an AI message can never slip in between a takeover's check and its commit.
+def get_by_id_for_update(db: Session, ticket_id: uuid.UUID, customer_id: uuid.UUID | None = None) -> Ticket | None:
+    query = select(Ticket).where(Ticket.id == ticket_id).with_for_update().execution_options(populate_existing=True)
+    if customer_id is not None:
+        query = query.where(Ticket.customer_id == customer_id)
+    return db.scalar(query)
+
+
 # Both filters are optional; most recently updated tickets come first
 def list_tickets(db: Session, customer_id: uuid.UUID | None = None, status: str | None = None) -> list[Ticket]:
     query = select(Ticket).order_by(Ticket.updated_at.desc())
@@ -41,6 +51,24 @@ def update_status(db: Session, ticket: Ticket, status: str) -> Ticket:
 
 def update_assignment(db: Session, ticket: Ticket, agent_id: uuid.UUID | None) -> Ticket:
     ticket.assigned_agent_id = agent_id
+    ticket.updated_at = func.now()
+    db.flush()
+    return ticket
+
+
+# M10: a staff member takes over the conversation now
+def set_taken_over(db: Session, ticket: Ticket, agent_id: uuid.UUID) -> Ticket:
+    ticket.taken_over_by = agent_id
+    ticket.taken_over_at = func.now()
+    ticket.updated_at = func.now()
+    db.flush()
+    return ticket
+
+
+# M10: the conversation is handed back to the AI
+def clear_taken_over(db: Session, ticket: Ticket) -> Ticket:
+    ticket.taken_over_by = None
+    ticket.taken_over_at = None
     ticket.updated_at = func.now()
     db.flush()
     return ticket

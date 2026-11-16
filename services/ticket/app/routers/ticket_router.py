@@ -86,3 +86,24 @@ def update_status(
     db: Session = Depends(get_db),
 ):
     return ticket_service.update_status(db, ticket_id, body.status)
+
+
+# M10, staff only: take over the conversation (the AI stops replying). 409 if another agent has it, unless admin.
+@router.post("/tickets/{ticket_id}/takeover", response_model=TicketResponse)
+def take_over_ticket(
+    ticket_id: uuid.UUID,
+    current_user: dict = Depends(require_role("agent", "admin")),
+    db: Session = Depends(get_db),
+):
+    return ticket_service.take_over_ticket(db, ticket_id, uuid.UUID(current_user["user_id"]), current_user["role"])
+
+
+# M10, staff only: hand the conversation back to the AI. 403 unless you took it over (or are an admin);
+# 409 if it is not taken over.
+@router.post("/tickets/{ticket_id}/release", response_model=TicketResponse)
+def release_ticket(
+    ticket_id: uuid.UUID,
+    current_user: dict = Depends(require_role("agent", "admin")),
+    db: Session = Depends(get_db),
+):
+    return ticket_service.release_ticket(db, ticket_id, uuid.UUID(current_user["user_id"]), current_user["role"])

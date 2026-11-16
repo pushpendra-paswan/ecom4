@@ -19,6 +19,9 @@ class Ticket(Base):
     subject: Mapped[str] = mapped_column(String(200))
     status: Mapped[str] = mapped_column(String(30))  # open | awaiting_approval | escalated | resolved
     assigned_agent_id: Mapped[uuid.UUID | None]
+    # M10: the staff member who took over the conversation (the AI stays silent while this is set), and when
+    taken_over_by: Mapped[uuid.UUID | None]
+    taken_over_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     # Set again whenever a message is added or the status or assignment changes
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

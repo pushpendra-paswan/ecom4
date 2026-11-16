@@ -75,6 +75,8 @@ class TicketServicer(ticket_pb2_grpc.TicketServiceServicer):
                 assigned_agent_id=str(ticket.assigned_agent_id) if ticket.assigned_agent_id else None,
                 created_at=ticket.created_at.isoformat(),
                 updated_at=ticket.updated_at.isoformat(),
+                taken_over_by=str(ticket.taken_over_by) if ticket.taken_over_by else None,
+                taken_over_at=ticket.taken_over_at.isoformat() if ticket.taken_over_at else None,
                 messages=message_items,
             )
         except Exception as error:
@@ -91,7 +93,8 @@ class TicketServicer(ticket_pb2_grpc.TicketServiceServicer):
                 raise BadRequestError(f"sender_type must be one of: {', '.join(GRPC_SENDER_TYPES)}")
             body = MessageCreate(content=request.content)
 
-            # Step 2: call the service (ai and system messages have no sender_id)
+            # Step 2: call the service (ai and system messages have no sender_id). M10: an ai message on a ticket
+            # a human has taken over is a ConflictError, so ALREADY_EXISTS
             message = ticket_service.add_message(db, ticket_id, request.sender_type, None, body.content)
 
             # Step 3: convert to proto
@@ -195,6 +198,8 @@ class TicketServicer(ticket_pb2_grpc.TicketServiceServicer):
                 assigned_agent_id=str(ticket.assigned_agent_id) if ticket.assigned_agent_id else None,
                 created_at=ticket.created_at.isoformat(),
                 updated_at=ticket.updated_at.isoformat(),
+                taken_over_by=str(ticket.taken_over_by) if ticket.taken_over_by else None,
+                taken_over_at=ticket.taken_over_at.isoformat() if ticket.taken_over_at else None,
             )
         except Exception as error:
             abort_from_error(context, error)

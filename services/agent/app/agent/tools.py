@@ -86,8 +86,10 @@ class EscalateToHumanInput(BaseModel):
     ticket_id: InjectedTicketId
 
 
-@tool(args_schema=SearchKnowledgeBaseInput)
-def search_knowledge_base(query: str) -> str:
+# M10: response_format="content_and_artifact": the model sees exactly the same numbered text as before; the raw
+# results (document id, title, section, score) stay on the ToolMessage as its artifact for the AI activity log.
+@tool(args_schema=SearchKnowledgeBaseInput, response_format="content_and_artifact")
+def search_knowledge_base(query: str) -> tuple[str, list[dict]]:
     """Search the company's policy documents.
 
     Use this for ANY question about company policy: returns, refunds, shipping and delivery times,
@@ -100,7 +102,7 @@ def search_knowledge_base(query: str) -> str:
     # Search through the Knowledge service.
     results = clients.search_knowledge(query, top_k=SEARCH_TOP_K)
     if not results:
-        return "No relevant policy was found for this query."
+        return "No relevant policy was found for this query.", []
 
     # Step 2: one numbered block per result: "[1] Title > Section", then the chunk text
     # (the stored chunk text starts with the same "Title > Section" line, so it is removed there)
@@ -109,7 +111,7 @@ def search_knowledge_base(query: str) -> str:
         heading = f"{result['title']} > {result['section']}"
         text = result["content"].removeprefix(heading).strip()
         blocks.append(f"[{number}] {heading}\n{text}")
-    return "\n\n".join(blocks)
+    return "\n\n".join(blocks), results
 
 
 @tool(args_schema=ListOrdersInput)
@@ -305,7 +307,7 @@ TOOLS = [
 ]
 
 # Tier of every tool (CLAUDE.md section 9): 1 read-only, 2 workflow, 3 approval request.
-# For documentation and for the M10 activity log.
+# For documentation and for the M10 activity log (graph.run_agent adds the tier to every logged tool call).
 TOOL_TIERS = {
     "search_knowledge_base": 1,
     "list_orders": 1,

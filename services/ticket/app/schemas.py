@@ -47,6 +47,8 @@ class TicketResponse(BaseModel):
     subject: str
     status: str
     assigned_agent_id: uuid.UUID | None
+    taken_over_by: uuid.UUID | None
+    taken_over_at: datetime | None
     created_at: datetime
     updated_at: datetime
 

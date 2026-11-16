@@ -1,7 +1,8 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, String, Text, func
+from sqlalchemy import DateTime, String, Text, func, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -30,5 +31,16 @@ class AgentRun(Base):
     escalation_reason: Mapped[str | None] = mapped_column(Text)
     # M9: the run ended paused, waiting for a human decision on this approval
     paused_for_approval_id: Mapped[uuid.UUID | None] = mapped_column()
+    # M10, the AI activity log (staff only). tool_calls: [{step, tool, tier, arguments, result, is_error}] in order;
+    # retrieved_chunks: [{query, document_id, title, section, score}] from search_knowledge_base
+    tool_calls: Mapped[list] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
+    retrieved_chunks: Mapped[list] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
+    # The exact text the run posted, or tried to post when the ticket was taken over meanwhile
+    reply_text: Mapped[str | None] = mapped_column(Text)
+    model_name: Mapped[str | None] = mapped_column(String(100))
+    # Summed over this run's model calls (0 when the run made none)
+    input_tokens: Mapped[int] = mapped_column(default=0, server_default="0")
+    output_tokens: Mapped[int] = mapped_column(default=0, server_default="0")
+    duration_ms: Mapped[int | None] = mapped_column()
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

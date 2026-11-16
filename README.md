@@ -88,6 +88,21 @@ python scripts/check_refund_flow.py                               # on the host 
 Until the dashboard exists (M12), staff decide with the Ticket API as `agent1`:
 `POST /api/tickets/approvals/{id}/approve` or `.../reject` with `{"note": "..."}` (Swagger: `/api/tickets/docs`).
 
+## Human takeover and AI activity log (M10)
+
+A support agent can take over a conversation (`POST /api/tickets/tickets/{id}/takeover`), which silences the AI on
+that ticket, and hand it back (`POST /api/tickets/tickets/{id}/release`). Staff can read exactly what the AI did on
+every run (tool calls with arguments and results, retrieved knowledge-base chunks, reply, tokens, duration):
+`GET /api/agent/tickets/{id}/activity` and `GET /api/agent/runs/{run_id}` (Swagger: `/api/agent/docs`).
+
+```bash
+python scripts/generate_proto.py                  # only after changing a .proto (ticket.proto changed in M10)
+docker compose up --build                         # runs the two new migrations (ticket 0002, agent 0004)
+python scripts/grpc_client_check.py               # 30 steps, incl. takeover: an ai PostMessage is ALREADY_EXISTS
+docker compose exec order python seed.py --reset
+python scripts/check_takeover_activity.py         # on the host (standard library only): 9 scenarios, ~2 minutes
+```
+
 ## URLs
 
 | What | URL |

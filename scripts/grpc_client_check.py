@@ -3,7 +3,8 @@
 #   python scripts/grpc_client_check.py
 # Needs grpcio, protobuf and PyJWT (see README); uses the generated stubs in scripts/generated/.
 # Every call sends a fresh service token signed as "agent" with SERVICE_TOKEN_SECRET from the repo's .env.
-# Prints one PASS/FAIL line per step and a summary. Safe to run again: it creates two new tickets and new approvals each time.
+# Prints one PASS/FAIL line per step and a summary. Safe to run again: it creates three new tickets and new approvals each time.
+# M10: steps 21 and 22 take over a ticket as agent1 over REST and check that the AI cannot post on it until it is released.
 # M9: the 4500.00 approval is auto-approved for a made-up return request, so the order worker logs a verification
 # failure for it ("return request ... does not exist"); that is expected.
 import json
@@ -31,6 +32,8 @@ SEARCH_TIMEOUT = 15
 CUSTOMER1_ID = "00000000-0000-0000-0000-000000000101"
 CUSTOMER3_ID = "00000000-0000-0000-0000-000000000103"
 CUSTOMER1_EMAIL = "customer1@example.com"
+AGENT1_ID = "00000000-0000-0000-0000-000000000011"
+AGENT1_EMAIL = "agent1@example.com"
 DEMO_PASSWORD = "Password123!"
 
 # Service tokens: read the shared secret from the repo's .env (the same value the services get)
@@ -371,9 +374,76 @@ except (urllib.error.URLError, KeyError, NameError) as error:
 except grpc.RpcError as error:
     report(step, False, f"{error.code().name}: {error.details()}")
 
+# Step 21: M10, agent1 takes over a fresh ticket over REST; the AI may then no longer post on it
+step = "M10: agent1 takes over a fresh ticket, PostMessage as ai -> ALREADY_EXISTS (GetTicket shows taken_over_by)"
+takeover_ticket_id = ""
+try:
+    ticket_body = json.dumps({"subject": "gRPC check: takeover", "message": "Checking the human takeover (grpc_client_check.py)"}).encode()
+    ticket_request = urllib.request.Request(
+        f"{BASE_URL}/api/tickets/tickets",
+        data=ticket_body,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {access_token}"},
+    )
+    with urllib.request.urlopen(ticket_request, timeout=DEFAULT_TIMEOUT) as response:
+        takeover_ticket_id = json.load(response)["ticket"]["id"]
+    login_body = json.dumps({"email": AGENT1_EMAIL, "password": DEMO_PASSWORD}).encode()
+    login_request = urllib.request.Request(
+        f"{BASE_URL}/api/identity/login", data=login_body, headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(login_request, timeout=DEFAULT_TIMEOUT) as response:
+        agent1_token = json.load(response)["access_token"]
+    takeover_request = urllib.request.Request(
+        f"{BASE_URL}/api/tickets/tickets/{takeover_ticket_id}/takeover",
+        data=b"",
+        method="POST",
+        headers={"Authorization": f"Bearer {agent1_token}"},
+    )
+    with urllib.request.urlopen(takeover_request, timeout=DEFAULT_TIMEOUT) as response:
+        json.load(response)
+    ticket = ticket_stub.GetTicket(
+        ticket_pb2.GetTicketRequest(ticket_id=takeover_ticket_id), timeout=DEFAULT_TIMEOUT, metadata=agent_metadata()
+    )
+    shows_takeover = ticket.taken_over_by == AGENT1_ID and ticket.HasField("taken_over_at")
+    try:
+        ticket_stub.PostMessage(
+            ticket_pb2.PostMessageRequest(ticket_id=takeover_ticket_id, sender_type="ai", content="The AI should not be heard."),
+            timeout=DEFAULT_TIMEOUT,
+            metadata=agent_metadata(),
+        )
+        report(step, False, "the call succeeded")
+    except grpc.RpcError as error:
+        report(step, shows_takeover and error.code() == grpc.StatusCode.ALREADY_EXISTS,
+               f"taken_over_by={ticket.taken_over_by or '-'}; {error.code().name}: {error.details()}")
+except (urllib.error.URLError, KeyError, NameError) as error:
+    report(step, False, str(error))
+except grpc.RpcError as error:
+    report(step, False, f"{error.code().name}: {error.details()}")
+
+# Step 22: M10, after agent1 releases the ticket the same PostMessage succeeds
+step = "M10: agent1 releases the ticket, PostMessage as ai -> saved"
+try:
+    release_request = urllib.request.Request(
+        f"{BASE_URL}/api/tickets/tickets/{takeover_ticket_id}/release",
+        data=b"",
+        method="POST",
+        headers={"Authorization": f"Bearer {agent1_token}"},
+    )
+    with urllib.request.urlopen(release_request, timeout=DEFAULT_TIMEOUT) as response:
+        released_ticket = json.load(response)
+    message = ticket_stub.PostMessage(
+        ticket_pb2.PostMessageRequest(ticket_id=takeover_ticket_id, sender_type="ai", content="Hi again! I am the AI assistant."),
+        timeout=DEFAULT_TIMEOUT,
+        metadata=agent_metadata(),
+    )
+    report(step, released_ticket["taken_over_by"] is None and message.sender_type == "ai", f"message {message.id}")
+except (urllib.error.URLError, KeyError, NameError) as error:
+    report(step, False, str(error))
+except grpc.RpcError as error:
+    report(step, False, f"{error.code().name}: {error.details()}")
+
 print("--- Deadlines and validation ---")
 
-# Step 21: a 1 millisecond deadline is too short for any real call
+# Step 23: a 1 millisecond deadline is too short for any real call
 step = "ListOrders with a 1 ms deadline -> DEADLINE_EXCEEDED"
 try:
     order_stub.ListOrders(
@@ -383,7 +453,7 @@ try:
 except grpc.RpcError as error:
     report(step, error.code() == grpc.StatusCode.DEADLINE_EXCEEDED, error.code().name)
 
-# Step 22: customer_id is required
+# Step 24: customer_id is required
 step = "GetOrder with an empty customer_id -> INVALID_ARGUMENT"
 try:
     order_stub.GetOrder(order_pb2.GetOrderRequest(order_number="ORD-1001", customer_id=""), timeout=DEFAULT_TIMEOUT, metadata=agent_metadata())
@@ -391,7 +461,7 @@ try:
 except grpc.RpcError as error:
     report(step, error.code() == grpc.StatusCode.INVALID_ARGUMENT, f"{error.code().name}: {error.details()}")
 
-# Step 23: customer_id must be a UUID
+# Step 25: customer_id must be a UUID
 step = "GetOrder with a malformed customer_id -> INVALID_ARGUMENT"
 try:
     order_stub.GetOrder(
@@ -406,7 +476,7 @@ except grpc.RpcError as error:
 print("--- Service tokens ---")
 list_orders_request = order_pb2.ListOrdersRequest(customer_id=CUSTOMER1_ID)
 
-# Step 24: no token at all
+# Step 26: no token at all
 step = "ListOrders without a token -> UNAUTHENTICATED"
 try:
     order_stub.ListOrders(list_orders_request, timeout=DEFAULT_TIMEOUT)
@@ -414,7 +484,7 @@ try:
 except grpc.RpcError as error:
     report(step, error.code() == grpc.StatusCode.UNAUTHENTICATED, f"{error.code().name}: {error.details()}")
 
-# Step 25: something that is not a JWT
+# Step 27: something that is not a JWT
 step = "ListOrders with a garbage token -> UNAUTHENTICATED"
 try:
     order_stub.ListOrders(
@@ -424,7 +494,7 @@ try:
 except grpc.RpcError as error:
     report(step, error.code() == grpc.StatusCode.UNAUTHENTICATED, f"{error.code().name}: {error.details()}")
 
-# Step 26: a well-formed token signed with another secret
+# Step 28: a well-formed token signed with another secret
 step = "ListOrders with a token signed with the wrong secret -> UNAUTHENTICATED"
 issued_at = int(time.time())
 wrong_secret_token = jwt.encode(
@@ -440,7 +510,7 @@ try:
 except grpc.RpcError as error:
     report(step, error.code() == grpc.StatusCode.UNAUTHENTICATED, f"{error.code().name}: {error.details()}")
 
-# Step 27: a correctly signed token that expired a minute ago
+# Step 29: a correctly signed token that expired a minute ago
 step = "ListOrders with an expired token -> UNAUTHENTICATED"
 issued_at = int(time.time()) - 120
 expired_token = jwt.encode(
@@ -456,7 +526,7 @@ try:
 except grpc.RpcError as error:
     report(step, error.code() == grpc.StatusCode.UNAUTHENTICATED, f"{error.code().name}: {error.details()}")
 
-# Step 28: a valid token, but the order service is not on the order server's allowlist
+# Step 30: a valid token, but the order service is not on the order server's allowlist
 step = "ListOrders with a valid token for sub=order -> PERMISSION_DENIED"
 issued_at = int(time.time())
 order_token = jwt.encode(
@@ -472,7 +542,7 @@ try:
 except grpc.RpcError as error:
     report(step, error.code() == grpc.StatusCode.PERMISSION_DENIED, f"{error.code().name}: {error.details()}")
 
-# Step 29: M9, the order service is on the TICKET server's allowlist, so its token may call GetApproval
+# Step 31: M9, the order service is on the TICKET server's allowlist, so its token may call GetApproval
 step = "GetApproval with a valid token for sub=order -> allowed"
 issued_at = int(time.time())
 order_token = jwt.encode(
@@ -490,7 +560,7 @@ try:
 except grpc.RpcError as error:
     report(step, False, f"{error.code().name}: {error.details()}")
 
-# Step 30: print the summary (and the ticket id, for the database check of the two approvals)
+# Step 32: print the summary (and the ticket id, for the database check of the two approvals)
 print()
 print(f"Ticket created by this run: {ticket_id}")
 print(f"Summary: {sum(step_results)}/{len(step_results)} steps passed")
