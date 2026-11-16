@@ -33,7 +33,8 @@ An AI Customer Support Automation Platform for a simulated e-commerce company, b
   3. `POST /tickets/{id}/release` (the agent who took over, or an admin) clears the takeover, sets an `escalated` ticket back to `open`, posts "Our AI assistant is back to help. A support agent can still join at any time." and publishes `ticket.takeover_changed` (`taken_over_by: null`). The next customer message is answered by the AI again.
 - AI activity log (M10): every run that reaches the graph stores, on its `agent_runs` row, the tool calls (model-visible arguments, tier, result, error flag), the retrieved knowledge-base chunks, the reply text, model, token usage and duration. Staff read it with `GET /api/agent/tickets/{id}/activity` (the M12 dashboard) and `GET /api/agent/runs/{run_id}`.
 - Auth: Identity signs RS256 JWTs with a private key; every other service verifies them locally with the public key (no call to Identity).
-- Current state (M10): Identity, Order, Ticket and Knowledge have databases and real REST endpoints; Order, Knowledge and Ticket also serve gRPC. Knowledge has a Celery worker and RAG search (OpenAI embeddings in pgvector). Ticket publishes events; Realtime pushes them to browsers over WebSockets and can run as several instances. The Agent service answers customer messages with a LangGraph agent with seven tools (knowledge search, list/get orders, return eligibility, create a return request, escalate to a human, request a refund) and exposes `GET /runs` for staff; a large refund pauses the graph until a human decides. The Order service has a consumer and a Celery worker that verify approved refunds with Ticket over gRPC and execute them. Staff can take over a conversation (the AI is silenced, enforced by the Ticket service) and read the AI activity log of every run (M10). RabbitMQ carries Celery tasks and events; Redis is the Celery result backend (knowledge, agent), the per-ticket agent lock and the Realtime fan-out channel.
+- Customer app (M11): plain HTML/CSS/JS ES modules at `http://localhost:8080/customer/`, served by Nginx. It calls the REST APIs through Nginx with the customer's JWT, opens one WebSocket to `/ws/connect`, and treats every `ticket.*` event as a signal to refetch the open view. Customers start returns and refunds by chatting with the AI (no return/refund buttons). See "Customer app (M11)" in section 7.
+- Current state (M10, plus the M11 customer app): Identity, Order, Ticket and Knowledge have databases and real REST endpoints; Order, Knowledge and Ticket also serve gRPC. Knowledge has a Celery worker and RAG search (OpenAI embeddings in pgvector). Ticket publishes events; Realtime pushes them to browsers over WebSockets and can run as several instances. The Agent service answers customer messages with a LangGraph agent with seven tools (knowledge search, list/get orders, return eligibility, create a return request, escalate to a human, request a refund) and exposes `GET /runs` for staff; a large refund pauses the graph until a human decides. The Order service has a consumer and a Celery worker that verify approved refunds with Ticket over gRPC and execute them. Staff can take over a conversation (the AI is silenced, enforced by the Ticket service) and read the AI activity log of every run (M10). RabbitMQ carries Celery tasks and events; Redis is the Celery result backend (knowledge, agent), the per-ticket agent lock and the Realtime fan-out channel.
 
 ## 3. Tech stack
 
@@ -79,9 +80,23 @@ Published to the host: Nginx `8080`, RabbitMQ management UI `15672`, and the thr
 │   ├── check_takeover_activity.py  # M10: 9 takeover and activity-log scenarios (host, stdlib only)
 │   └── generated/             # M5: generated stubs for all three protos (committed)
 ├── frontend/
-│   ├── customer/  index.html, app.js (placeholder health check)
+│   ├── customer/  M11 customer app (see below)
 │   ├── agent/     index.html, app.js (placeholder health check)
-│   └── test/      realtime.html   # M6 THROWAWAY WebSocket test page; delete (with nginx's /test/ location) once M11/M12 exist
+│   └── test/      realtime.html   # M6 THROWAWAY WebSocket test page; M12 uses it as a staff view, then deletes it (with nginx's /test/ location)
+
+frontend/customer/ (M11, no build step, no libraries):
+    ├── index.html             # shell: header (name, Support/Orders nav, "Reconnecting…", Sign out), <main id="app">, <script type="module" src="js/main.js">
+    ├── styles.css             # the one stylesheet: CSS variables for colors/spacing, system fonts, phone-width rules
+    └── js/
+        ├── main.js            # start-up, hash router, header, sign out, session start (GET /me + role check + WebSocket), passes events to the open view
+        ├── api.js             # apiRequest(method, path, body) (token header, JSON, readable errors, 401 → session ended) + getToken/saveToken/clearToken/setSessionEndedHandler
+        ├── realtime.js        # connectRealtime(handlers) / disconnectRealtime(): auth message, 25 s ping, reconnect backoff, event_id dedupe
+        ├── format.js          # formatMoney (₹, en-IN grouping), formatDateTime, formatDate (date-only), ticketStatusLabel, orderStatusLabel
+        └── views/
+            ├── auth.js        # renderAuth: sign-in / create-account form, demo-account hint, message from main.js
+            ├── tickets.js     # renderTicketList, renderNewTicket (subject prefilled from ?order=)
+            ├── chat.js        # renderChat: conversation, status badge, takeover banner, typing indicator, message box
+            └── orders.js      # renderOrderList, renderOrderDetail (items, return status, shipment, "Get help with this order")
 └── services/<identity|ticket|order|knowledge|agent|realtime>/
     ├── Dockerfile             # identical in all six
     ├── requirements.txt       # each service pins what it uses (see section 3)
@@ -424,7 +439,7 @@ Order of events for one action: takeover (M10) → `ticket.assigned` (only if th
 | server → client | `{"type": "event", "event": <envelope>}` |
 Delivery is **at-least-once** (a RabbitMQ redelivery can repeat an event): clients treat events as "refresh" signals and may deduplicate by `event_id`. Realtime REST: only `GET /health` (also returns `instance`). Logs (`docker compose logs realtime`) show `[<instance>] connected / disconnected / forwarded ... to Redis / delivered ... to N local connection(s)`.
 
-*Test page* (`frontend/test/realtime.html`, **throwaway**, delete once the real frontends exist): http://localhost:8080/test/realtime.html. Log in (prefilled customer1), Connect, "Connect with a bad token" (closes 4401), Send ping, status line with `auth_ok` and the instance id, event log (newest first) with type, `event_id` and `data`; on `ticket.message_created` it fetches the ticket over REST with the tab's token and lists its messages; a repeated `event_id` is shown as **DUPLICATE** in red. Token per tab in `sessionStorage`.
+*Test page* (`frontend/test/realtime.html`, **throwaway**; kept through M11 as a staff view, M12 deletes it): http://localhost:8080/test/realtime.html. Log in (prefilled customer1), Connect, "Connect with a bad token" (closes 4401), Send ping, status line with `auth_ok` and the instance id, event log (newest first) with type, `event_id` and `data`; on `ticket.message_created` it fetches the ticket over REST with the tab's token and lists its messages; a repeated `event_id` is shown as **DUPLICATE** in red. Token per tab in `sessionStorage`.
 
 **Celery tasks:** `app.tasks.ingest_document` (knowledge, queue `knowledge`, above), `app.tasks.run_agent_for_message` and `app.tasks.resume_after_approval` (M9) (agent, queue `agent`, below), `app.tasks.execute_approved_refund(approval_id)` (M9, order, queue `order`: `bind=True`, `acks_late=True`, `ignore_result=True`, `max_retries=5`, above). Events never use Celery.
 
@@ -516,6 +531,27 @@ How it is collected (inline in `graph.run_agent`, no helper functions): this run
 *Check script, takeover and activity* (`python scripts/check_takeover_activity.py`, host, stdlib only, M10; run `docker compose exec order python seed.py --reset` first, ~2 minutes): logs in as customer1, customer3, agent1, agent2; polls the AI reply (60 s) and the activity endpoint until the runs are finished (15 s). Scenarios: (1) "How long do I have to return a jacket?" → one completed run, a `search_knowledge_base` call with only `query`, `retrieved_chunks` incl. Returns Policy, `reply_text` = the AI message, tokens and duration > 0; (2) "Where is my order ORD-1003?" → `get_order` with exactly `{"order_number": "ORD-1003"}`, tier 1, no `customer_id` in `tool_calls`; (3) agent1 takes over ticket 1 → `taken_over_by`/assigned agent1, last message the joined system message; (4) customer1 takeover 403, agent2 409; (5) customer message on the taken-over ticket → no AI message in 20 s, newest run `skipped`/`human_takeover`; (6) agent2 release 403, agent1 release → `taken_over_by` null, last message "AI assistant is back"; (7) new customer question → AI reply within 60 s; (8) customer3 "I want to speak to a person" → `escalated`, run has `escalation_reason`, take over + release → `open`; (9) customer1 on the activity endpoint → 403. Last run (2026-11-16): **9/9 passed** (first try). Sample: the jacket answer used one search (`"return window for jackets"`), 4 chunks (Returns Policy ×3, Warranty Policy), 6,685/63 tokens, 8.9 s.
 *Other M10 verification* (2026-11-16): `grpc_client_check.py` **30/30** (new steps 21–22: agent1 takes over a fresh ticket over REST → `GetTicket` shows `taken_over_by`, `PostMessage` as `ai` → `ALREADY_EXISTS`; after release it succeeds); both migrations ran and `alembic check` reports no changes for ticket and agent; `ticket.takeover_changed` seen in the Realtime logs; **race** (customer message, then takeover after 0/0/2/2/3/3 s, six tickets): one run `skipped`/`human_takeover`, five `skipped`/`reply_discarded_takeover` with their `reply_text` logged, **no AI message on any ticket**, no task retries; a pending tablet refund approved **while the ticket was taken over** → approval run `skipped`/`reply_discarded_takeover` with the "Good news!" text in `reply_text`, no AI message, return `refunded` (Order side unaffected); `check_refund_flow.py` 7/7, `check_agent_orders.py` 10/10, `check_agent_answers.py` 8/8 after `--reset` (the refund and order scripts each failed one scenario on their first attempt from model variance, read in the activity log: the smartwatch was escalated as a "warranty claim", and in another run the model copied an item id wrongly twice and escalated; both passed on the next run); their runs show full activity data on `GET /runs/{run_id}` (paused run: `get_order`, `check_return_eligibility`, `create_return_request` (tier 2), `request_refund` (tier 3); approval runs: outcome text, 0 tokens; awaiting skip: the fixed text).
 
+**Customer app (M11)** (`frontend/customer/`, `http://localhost:8080/customer/`).
+*Routes* (hash router in `main.js`; signed out, every route shows the sign-in page; unknown routes and `#/login` while signed in go to `#/tickets`):
+| Route | View | REST calls (through Nginx) | Refetches on |
+|---|---|---|---|
+| `#/login` | `renderAuth` | `POST /api/identity/register` (then login), `POST /api/identity/login`, then `GET /api/identity/me` | – |
+| `#/tickets` | `renderTicketList` | `GET /api/tickets/tickets` (API order: newest `updated_at` first) | any `ticket.*` event; reconnect |
+| `#/new-ticket` (`?order=ORD-xxxx` prefills "Help with order ORD-xxxx") | `renderNewTicket` | `POST /api/tickets/tickets` `{subject, message}` → opens `#/tickets/<id>` | – |
+| `#/tickets/<id>` | `renderChat` | `GET /api/tickets/tickets/{id}`, `POST /api/tickets/tickets/{id}/messages` `{content}` | `ticket.*` events whose `data.ticket_id` is this ticket (`message_created`, `status_changed`, `takeover_changed`, `assigned`); reconnect; after own send |
+| `#/orders` | `renderOrderList` | `GET /api/orders/orders` (sorted newest `ordered_at` first in the browser; the API sorts by number) | reconnect only |
+| `#/orders/<order_number>` | `renderOrderDetail` | `GET /api/orders/orders/{order_number}` (items with `return_request`, `shipment`) | reconnect only |
+*Session:* the JWT is in `sessionStorage` (`customer_token`, per tab). After sign-in (or on reload with a saved token) `GET /me` loads the profile; a role other than `customer` signs out with "This app is for customers. Support staff should use the agent dashboard." Any **401** (except from `/login`, where it means a wrong password) or a WebSocket close **4401** clears the token, closes the socket and shows sign-in with "Your session has ended. Please sign in again." `apiRequest` turns errors into one sentence: `detail` string, FastAPI 422 lists as `field: message`, 5xx/HTML error pages and network failures as fixed sentences; the error carries `status`.
+*WebSocket* (`realtime.js`): one socket per tab to `ws(s)://<page host>/ws/connect`; first message `{"type": "auth", "token": ...}`; on `auth_ok` the backoff resets and a `{"type": "ping"}` is sent every 25 s. Events are passed to `main.js` once per `event_id` (the last 500 ids are remembered); `main.js` hands only `ticket.*` events to the open view (customers never receive `approval.*`/`refund.*`). On an unexpected close it shows "Reconnecting…" in the header and reconnects after 1, 2, 4, 8, then every 10 s; after every successful reconnect the open view refetches (events sent while disconnected are lost). Sign out closes the socket and stops reconnecting.
+*Conversation:* messages oldest first; only messages not yet shown are appended (by id), and the list scrolls to the newest when something was added. Customer on the right ("You"), `ai` "AI assistant" and `agent` "Support agent" on the left in different colors, `system` centered and muted. "A support agent is handling this conversation" banner while `taken_over_by` is set. Message box: Enter sends, Shift+Enter new line, disabled while sending, text kept (with an error) if sending fails.
+*Typing indicator* (client-side only, no typing event; recomputed on every load of the conversation): "AI assistant is typing…" shows when the newest message is the customer's and less than 60 s old (server `created_at` vs the browser clock), and the ticket is not taken over, not `escalated` and not `awaiting_approval`; it hides when a newer message arrives or the 60 s run out. Taken over: nothing extra (the banner explains). `escalated` (not taken over): "Our support team will reply during support hours, Monday to Saturday, 9:00 to 19:00 IST." `awaiting_approval`: nothing (the AI posts its fixed review message).
+*Orders:* list with number, date, status, total, item names. Detail: per item name, category, quantity, price and return status (`requested` → "Return requested, refund in progress", `refunded` → "Refunded ₹X", none → nothing); shipment (carrier, tracking number, status, shipped, estimated and delivered dates) or "Not shipped yet"; "Get help with this order" → `#/new-ticket?order=<number>`.
+*Safety:* API data is never inserted with `innerHTML`; every value is set with `textContent` (or an input's `value`) on elements built with `createElement`. Message text keeps line breaks with `white-space: pre-wrap`. Verified: `<img src=x onerror=alert(1)>` shows as text and no alert fires.
+*Formatting:* money `₹` + `Intl.NumberFormat('en-IN')` (no forced decimals: ₹4,500, ₹1,25,000); timestamps in the browser's local time (`dateStyle: medium, timeStyle: short`); date-only values (`2026-11-15`) are built from their parts so they never shift a day.
+*Nginx (M11):* `/customer/` adds `Cache-Control: no-store` (development, so code changes show without a hard refresh); JS is served as `application/javascript` via the standard `mime.types` include (verified with `curl -I`); `absolute_redirect off` so `/customer` redirects to `/customer/` on port 8080 instead of port 80. `frontend/` is bind-mounted read-only, so frontend edits need no restart (Nginx config edits need `docker compose restart nginx`).
+*M11 verification* (2026-11-16, headless Chrome driven over the DevTools protocol from a throwaway scratch script, plus `curl -I`): all ten done-checks passed, at 1200 px and 375 px (no horizontal scroll on any view), no JavaScript errors: sign-in/wrong password/register/staff message; orders incl. DL-1003 and "Not shipped yet"; headphones refund live → "Refunded ₹4,500"; smartwatch → "Waiting for review", fixed awaiting message, approval in REST → outcome live, status Open, "Refunded ₹18,000"; takeover banner/system message live, no typing, no AI reply, agent reply live, release → AI answers; two tabs identical, no duplicates; `docker compose restart realtime` → "Reconnecting…" then a message posted during the restart appears; XSS text shown as text, no alert; foreign ticket "not found"; cleared token → session-ended message. AI replies had no Markdown.
+*Prompt (M11):* `SYSTEM_PROMPT` style rule "Write in plain text. Do not use Markdown formatting such as asterisks, headings or tables. Short paragraphs and simple numbered lines are fine." (the app shows replies as plain text).
+
 **Environment variables per service** (set in `docker-compose.yml`, values from `.env`):
 `SERVICE_NAME`, `PORT`, `ROOT_PATH` (the Nginx prefix), `DATABASE_URL` (not for realtime), `REDIS_URL`, `RABBITMQ_URL`. Identity also gets `JWT_PRIVATE_KEY_PATH`, `JWT_PUBLIC_KEY_PATH`, `ACCESS_TOKEN_EXPIRE_MINUTES`. Order also gets `JWT_PUBLIC_KEY_PATH` (and mounts only `keys/public`). Ticket gets `JWT_PUBLIC_KEY_PATH` and `REFUND_AUTO_APPROVE_LIMIT` (mounts only `keys/public`). Knowledge gets `JWT_PUBLIC_KEY_PATH`, `OPENAI_API_KEY`, `EMBEDDING_MODEL` (mounts only `keys/public`). Realtime (M6) gets `JWT_PUBLIC_KEY_PATH` (mounts only `keys/public`), no `DATABASE_URL`; it has no `container_name` and no host port so it can be scaled. `knowledge-worker` gets the same variables as knowledge minus `PORT`/`ROOT_PATH` (`SERVICE_NAME=knowledge-worker`) and mounts no keys (it never checks tokens; the path is only required by `config.py`).
 M5: order, knowledge and ticket also get `GRPC_PORT` (50051 / 50052 / 50053), `SERVICE_TOKEN_SECRET` (`${SERVICE_TOKEN_SECRET:?...}`: Compose refuses to start if it is unset or empty) and `GRPC_ALLOWED_CALLERS` (`agent`). The worker gets `GRPC_PORT: 50052`, `SERVICE_TOKEN_SECRET: not-used-by-the-worker` and `GRPC_ALLOWED_CALLERS: none` only because it shares `config.py`; it never starts a gRPC server and never sees the real secret.
@@ -536,7 +572,7 @@ M7: `agent` and `agent-worker` get `DATABASE_URL`, `REDIS_URL`, `RABBITMQ_URL`, 
 - [x] M8 Agent order tools (list/get orders, return eligibility, create return, escalate; ids injected from state)
 - [x] M9 Approval and refund flow (request_refund tool, interrupt/resume on human decisions, Order verifies approvals over gRPC before refunding)
 - [x] M10 Human takeover and AI activity log (takeover/release silences the AI, enforced by the Ticket service; activity log of every run on `agent_runs`, staff endpoints)
-- [ ] M11 Customer app
+- [x] M11 Customer app (plain JS ES modules at `/customer/`: sign in/register, orders with return status, tickets, live AI chat over WebSocket with reconnect + refetch)
 - [ ] M12 Agent dashboard
 - [ ] M13 Hardening and demo
 
@@ -568,7 +604,7 @@ Delivered orders have a `BlueDart` shipment (`BD-<number>`, shipped 3 days befor
 - All five API services (and realtime, minus Postgres) wait for Postgres, Redis and RabbitMQ healthy, so later milestones need no `depends_on` changes.
 - Service containers have no Docker healthcheck (`python:3.12-slim` has no curl); Nginx just starts after them.
 - No code bind mounts: code changes need `docker compose up --build`.
-- Placeholder pages: the customer page checks `/api/identity/health`, the agent page checks `/api/tickets/health`.
+- Placeholder pages (M0): the agent page checks `/api/tickets/health`. The customer placeholder (`app.js`) was replaced by the M11 app.
 - Identity migrations run from the `command:` in `docker-compose.yml` (`alembic upgrade head && exec uvicorn ...`, with `$$PORT` so Compose does not substitute it); the Dockerfile stays identical.
 - `alembic/env.py` is online-mode only (no offline SQL generation), to keep it short.
 - Swagger through Nginx needed no extra work: the M0 `root_path` setup is enough (`/api/identity/docs` loads and "Authorize" accepts a pasted token via `HTTPBearer`).
@@ -692,6 +728,17 @@ Delivered orders have a `BlueDart` shipment (`BD-<number>`, shipped 3 days befor
 - M10: `duration_ms` is measured per attempt for completed/skipped runs (`time.monotonic()` in the run service), and from the run row's `started_at` for failed runs (the failure path has no start time of its own, and it covers all retries). Skip-rule runs record their duration too (a few milliseconds).
 - M10: `clients.search_knowledge` now also returns `document_id` (it was in the gRPC response already) for the activity log.
 - M10: regenerating the stubs for the new `Ticket` fields also updates the order service's copy of `ticket_pb2.py` (generated, committed; no order code changed).
+- M11: customers start returns and refunds **through the chat**, not with buttons, so the AI (eligibility checks, return, `request_refund`) and the approval flow handle every one; the order page only offers "Get help with this order".
+- M11: "Get help with this order" passes the order number as `#/new-ticket?order=ORD-xxxx` (a query on the listed route); the form builds the subject "Help with order ORD-xxxx".
+- M11: the typing indicator is derived from the loaded conversation (newest message is the customer's and < 60 s old) instead of a "just sent" flag, so it also works right after creating a ticket, in a second tab and after a reload.
+- M11: events are refresh signals: the chat refetches the whole ticket and appends only new message ids (messages never change), so duplicates are impossible and `aria-live` announces only new messages; a load counter drops responses that arrive after a newer request.
+- M11: each route renders into a fresh `<section>`; a late response from the previous view writes into the detached section and never into the new view.
+- M11: a 401 means "session ended" for every request except `POST /login` (wrong password); the session-ended handler is registered by `main.js` in `api.js` (`setSessionEndedHandler`), so views need no 401 handling.
+- M11: a malformed ticket id in the URL (API 422) is shown as "Ticket not found", like another customer's ticket (404).
+- M11: the sign-in message (session ended, staff account) stays until the next successful sign-in, so a second render of the sign-in page cannot lose it.
+- M11: registering calls `POST /register` and then `POST /login` with the same credentials (register returns the user, not a token).
+- M11: small view-local arrow functions (`loadConversation`, `loadTickets`, `showMode`, …) exist only where the same steps run more than once (first load, events, reconnect, after sending); `goTo` and `signOut` in `main.js` are used from several places.
+- M11: Nginx `absolute_redirect off` (not asked for) so `http://localhost:8080/customer` redirects correctly.
 - M8: prompt changes made while checking: "Not eligible" explains the window length ("the 30-day return window has passed"); after creating a return the model must search the refund policy and say the team reviews and processes the refund (it had said "processed automatically"); for "where is my …" it must call `get_order` and give tracking without asking permission (it had stopped at "shipped, want tracking?").
 
 ## 10. How to run
@@ -757,6 +804,13 @@ python scripts/check_takeover_activity.py            # on the host, stdlib only:
 # take over / release as staff: POST /api/tickets/tickets/{id}/takeover | /release  (Swagger /api/tickets/docs)
 # activity log: GET /api/agent/tickets/{id}/activity, GET /api/agent/runs/{run_id}   (Swagger /api/agent/docs)
 ```
+```bash
+# M11 customer app
+docker compose restart nginx                         # once, after the nginx.conf change (frontend files need no restart)
+docker compose up -d --build agent-worker agent      # once, for the plain-text prompt rule (then restart nginx if you see 502s)
+docker compose exec order python seed.py --reset     # fresh demo orders before the end-to-end checks
+# open http://localhost:8080/customer/ ; staff decisions/takeover still in Swagger (/api/tickets/docs) until M12
+```
 `.env` needs `SERVICE_TOKEN_SECRET` (M5), a real `OPENAI_API_KEY` for ingestion, search and the agent, `CHAT_MODEL`, `AGENT_RECURSION_LIMIT` and `AGENT_HISTORY_LIMIT` (M7; copy the new lines from `.env.example`; M8 raised `AGENT_RECURSION_LIMIT` to 16, update an existing `.env`). Each service's tables are created by its container's `alembic upgrade head` on startup (PGVector's tables by the knowledge API at startup).
 
 ## 11. Known limitations and deviations
@@ -774,7 +828,13 @@ python scripts/check_takeover_activity.py            # on the host, stdlib only:
 - One slow client can delay delivery to others on the same instance by up to 5 s per event (sends are sequential, with a 5 s timeout).
 - Events are published after the commit but outside the transaction: a crash between commit and publish loses the event.
 - Realtime also logs FastAPI's `root_path` deprecation warning (same as the other services).
-- `frontend/test/realtime.html` is a throwaway verification page; delete it and Nginx's `/test/` location when M11/M12 exist.
+- `frontend/test/realtime.html` is a throwaway verification page; M12 deletes it and Nginx's `/test/` location.
+- M11: the typing indicator is **simulated on the client** (no typing event): it compares the server's `created_at` with the browser clock, so a badly wrong browser clock shows it too long or not at all; it can also show for up to 60 s when the AI decides not to answer (e.g. a skip rule).
+- M11: there is **no pagination**: the tickets and orders lists and a conversation load everything every time.
+- M11: the token is **not refreshed**: when it expires (60 min) the next request or reconnect sends the customer back to sign-in. An expired token on an open WebSocket is not noticed until it reconnects (see the M6 limitation).
+- M11: orders do not update live (refund events go to staff only); the order pages refetch when opened and after a reconnect.
+- M11: `Cache-Control: no-store` on `/customer/` is a development setting (no browser caching at all).
+- M11: Chrome logs failed requests in the console (e.g. the 401 of a wrong password, the 404 of a foreign ticket, WebSocket 502s while Realtime restarts); these are network log lines, not JavaScript errors.
 - Deviation: the ticket seed script is `services/ticket/seed.py`, for the same reason as identity's and order's.
 - Deviation: the order seed script is `services/order/seed.py` for the same reason as identity's (it needs the service's models). Both are copied into the image: rebuild after editing them.
 - Deviation: the identity seed script is `services/identity/seed.py`, not in `/scripts`, because it needs the service's models, repository and password hashing (the file is copied into the image with the rest of the service folder; rebuild after editing it).

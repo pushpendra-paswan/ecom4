@@ -4,11 +4,25 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Customer Support</title>
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <h1>Customer Support</h1>
-  <p>Placeholder page. The customer app arrives in M11.</p>
-  <p>Identity service health: <strong id="health-result">Loading...</strong></p>
-  <script type="module" src="app.js"></script>
+  <header id="app-header" class="app-header" hidden>
+    <div class="header-inner">
+      <span class="brand">Customer Support</span>
+      <nav aria-label="Main">
+        <a href="#/tickets" data-nav="tickets">Support</a>
+        <a href="#/orders" data-nav="orders">Orders</a>
+      </nav>
+      <span id="connection-status" class="connection-status" role="status" hidden>Reconnecting…</span>
+      <span class="user">
+        <span id="user-name"></span>
+        <button id="sign-out-button" type="button">Sign out</button>
+      </span>
+    </div>
+  </header>
+  <main id="app" class="app-main">Loading…</main>
+  <noscript>This app needs JavaScript.</noscript>
+  <script type="module" src="js/main.js"></script>
 </body>
 </html>
