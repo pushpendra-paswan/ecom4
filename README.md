@@ -44,7 +44,7 @@ docker compose up --build --scale realtime=2
 Scale on `up`: Nginx resolves the `realtime` replicas when it starts. If you change the number of replicas while
 Nginx is already running, run `docker compose restart nginx`.
 
-Throwaway test page (open it in several tabs, one per user): http://localhost:8080/test/realtime.html
+Watch it live in the customer app and the agent dashboard (M11, M12), each tab signed in as a different user.
 
 ## AI agent (M7)
 
@@ -85,7 +85,7 @@ docker compose exec order python seed.py --reset                  # eleven demo 
 python scripts/check_refund_flow.py                               # on the host (standard library only): 7 scenarios
 ```
 
-Until the dashboard exists (M12), staff decide with the Ticket API as `agent1`:
+Staff decide in the agent dashboard (M12, Approvals page), or with the Ticket API:
 `POST /api/tickets/approvals/{id}/approve` or `.../reject` with `{"note": "..."}` (Swagger: `/api/tickets/docs`).
 
 ## Human takeover and AI activity log (M10)
@@ -103,6 +103,19 @@ docker compose exec order python seed.py --reset
 python scripts/check_takeover_activity.py         # on the host (standard library only): 9 scenarios, ~2 minutes
 ```
 
+## Agent dashboard (M12)
+
+http://localhost:8080/agent/ for support staff (`agent1@example.com`, `agent2@example.com`, `admin@example.com`,
+password `Password123!`): the ticket queue with filters, each ticket's conversation and AI activity log, take over /
+release / reply / assign / change status, and the refund approvals with the return request for context. Everything
+updates live over the WebSocket. Sign in to the customer app (http://localhost:8080/customer/) in another tab to play
+the customer: each tab has its own session.
+
+```bash
+docker compose restart nginx                     # once, after the nginx.conf change (frontend files need no restart)
+docker compose exec order python seed.py --reset # fresh demo orders before trying the refund flows
+```
+
 ## URLs
 
 | What | URL |
@@ -115,5 +128,4 @@ python scripts/check_takeover_activity.py         # on the host (standard librar
 | Knowledge API | http://localhost:8080/api/knowledge/health (Swagger: `/api/knowledge/docs`) |
 | Agent API | http://localhost:8080/api/agent/health (Swagger: `/api/agent/docs`) |
 | Realtime | http://localhost:8080/ws/health (WebSocket: `ws://localhost:8080/ws/connect`) |
-| Realtime test page (M6, throwaway) | http://localhost:8080/test/realtime.html |
 | RabbitMQ management UI | http://localhost:15672 (user/password from `.env`) |

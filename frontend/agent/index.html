@@ -3,12 +3,30 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Agent Dashboard</title>
+  <title>Support Dashboard</title>
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <h1>Agent Dashboard</h1>
-  <p>Placeholder page. The agent dashboard arrives in M12.</p>
-  <p>Ticket service health: <strong id="health-result">Loading...</strong></p>
-  <script type="module" src="app.js"></script>
+  <header id="app-header" class="app-header" hidden>
+    <div class="header-inner">
+      <span class="brand">Support Dashboard</span>
+      <nav aria-label="Main">
+        <a href="#/tickets" data-nav="tickets">Tickets</a>
+        <a href="#/approvals" data-nav="approvals">
+          Approvals
+          <span id="pending-count" class="count" title="Pending approvals" hidden></span>
+        </a>
+      </nav>
+      <span id="connection-status" class="connection-status" role="status" hidden>Reconnecting…</span>
+      <span class="user">
+        <span id="user-email"></span>
+        <span id="user-role" class="badge"></span>
+        <button id="sign-out-button" type="button">Sign out</button>
+      </span>
+    </div>
+  </header>
+  <main id="app" class="app-main">Loading…</main>
+  <noscript>This dashboard needs JavaScript.</noscript>
+  <script type="module" src="js/main.js"></script>
 </body>
 </html>

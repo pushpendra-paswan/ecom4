@@ -34,7 +34,8 @@ An AI Customer Support Automation Platform for a simulated e-commerce company, b
 - AI activity log (M10): every run that reaches the graph stores, on its `agent_runs` row, the tool calls (model-visible arguments, tier, result, error flag), the retrieved knowledge-base chunks, the reply text, model, token usage and duration. Staff read it with `GET /api/agent/tickets/{id}/activity` (the M12 dashboard) and `GET /api/agent/runs/{run_id}`.
 - Auth: Identity signs RS256 JWTs with a private key; every other service verifies them locally with the public key (no call to Identity).
 - Customer app (M11): plain HTML/CSS/JS ES modules at `http://localhost:8080/customer/`, served by Nginx. It calls the REST APIs through Nginx with the customer's JWT, opens one WebSocket to `/ws/connect`, and treats every `ticket.*` event as a signal to refetch the open view. Customers start returns and refunds by chatting with the AI (no return/refund buttons). See "Customer app (M11)" in section 7.
-- Current state (M10, plus the M11 customer app): Identity, Order, Ticket and Knowledge have databases and real REST endpoints; Order, Knowledge and Ticket also serve gRPC. Knowledge has a Celery worker and RAG search (OpenAI embeddings in pgvector). Ticket publishes events; Realtime pushes them to browsers over WebSockets and can run as several instances. The Agent service answers customer messages with a LangGraph agent with seven tools (knowledge search, list/get orders, return eligibility, create a return request, escalate to a human, request a refund) and exposes `GET /runs` for staff; a large refund pauses the graph until a human decides. The Order service has a consumer and a Celery worker that verify approved refunds with Ticket over gRPC and execute them. Staff can take over a conversation (the AI is silenced, enforced by the Ticket service) and read the AI activity log of every run (M10). RabbitMQ carries Celery tasks and events; Redis is the Celery result backend (knowledge, agent), the per-ticket agent lock and the Realtime fan-out channel.
+- Agent dashboard (M12): plain HTML/CSS/JS ES modules at `http://localhost:8080/agent/` for `agent`/`admin` users. Ticket queue, ticket detail (conversation, actions, AI activity log) and refund approvals, all over REST through Nginx; one WebSocket per tab receives every `ticket.*`, `approval.*` and `refund.completed` event (staff room), and events are grouped (~0.5 s) before views refetch. Staff no longer need Swagger for the normal workflow. See "Agent dashboard (M12)" in section 7.
+- Current state (M12): Identity, Order, Ticket and Knowledge have databases and real REST endpoints; Order, Knowledge and Ticket also serve gRPC. Knowledge has a Celery worker and RAG search (OpenAI embeddings in pgvector). Ticket publishes events; Realtime pushes them to browsers over WebSockets and can run as several instances. The Agent service answers customer messages with a LangGraph agent with seven tools (knowledge search, list/get orders, return eligibility, create a return request, escalate to a human, request a refund) and exposes `GET /runs` for staff; a large refund pauses the graph until a human decides. The Order service has a consumer and a Celery worker that verify approved refunds with Ticket over gRPC and execute them. Staff can take over a conversation (the AI is silenced, enforced by the Ticket service) and read the AI activity log of every run (M10). Customers use the M11 customer app and staff the M12 dashboard. RabbitMQ carries Celery tasks and events; Redis is the Celery result backend (knowledge, agent), the per-ticket agent lock and the Realtime fan-out channel.
 
 ## 3. Tech stack
 
@@ -81,8 +82,7 @@ Published to the host: Nginx `8080`, RabbitMQ management UI `15672`, and the thr
 │   └── generated/             # M5: generated stubs for all three protos (committed)
 ├── frontend/
 │   ├── customer/  M11 customer app (see below)
-│   ├── agent/     index.html, app.js (placeholder health check)
-│   └── test/      realtime.html   # M6 THROWAWAY WebSocket test page; M12 uses it as a staff view, then deletes it (with nginx's /test/ location)
+│   └── agent/     M12 support-agent dashboard (see below)   # frontend/test/ (M6 test page) was deleted in M12
 
 frontend/customer/ (M11, no build step, no libraries):
     ├── index.html             # shell: header (name, Support/Orders nav, "Reconnecting…", Sign out), <main id="app">, <script type="module" src="js/main.js">
@@ -97,6 +97,19 @@ frontend/customer/ (M11, no build step, no libraries):
             ├── tickets.js     # renderTicketList, renderNewTicket (subject prefilled from ?order=)
             ├── chat.js        # renderChat: conversation, status badge, takeover banner, typing indicator, message box
             └── orders.js      # renderOrderList, renderOrderDetail (items, return status, shipment, "Get help with this order")
+frontend/agent/ (M12, no build step, no libraries; api.js, realtime.js and format.js are copies of the customer app's):
+    ├── index.html             # shell: header (Tickets, Approvals + pending count, "Reconnecting…", email, role, Sign out), <main id="app">
+    ├── styles.css             # the one stylesheet (started from the customer app's): CSS variables, system fonts, queue/detail grid, 960 px and 480 px breakpoints
+    └── js/
+        ├── main.js            # start-up, hash router, header + pending count, sign out, role check, event grouping (500 ms) and dispatch to the open views
+        ├── api.js             # copy of the customer app's; only the sessionStorage key differs (agent_token)
+        ├── realtime.js        # unchanged copy of the customer app's
+        ├── format.js          # formatMoney, formatDateTime, ticketStatusLabel (staff labels), approvalStatusLabel, tierLabel
+        └── views/
+            ├── auth.js        # renderAuth: sign-in only, demo staff accounts + "one session per tab" hint
+            ├── queue.js       # renderQueue: filters (status via API, "Assigned to me"/"Taken over" in the browser), list, highlight
+            ├── ticket.js      # renderTicket: header, actions, Conversation tab (reply box), AI activity tab
+            └── approvals.js   # renderApprovals: filter, cards with return-request context, approve/reject
 └── services/<identity|ticket|order|knowledge|agent|realtime>/
     ├── Dockerfile             # identical in all six
     ├── requirements.txt       # each service pins what it uses (see section 3)
@@ -439,7 +452,7 @@ Order of events for one action: takeover (M10) → `ticket.assigned` (only if th
 | server → client | `{"type": "event", "event": <envelope>}` |
 Delivery is **at-least-once** (a RabbitMQ redelivery can repeat an event): clients treat events as "refresh" signals and may deduplicate by `event_id`. Realtime REST: only `GET /health` (also returns `instance`). Logs (`docker compose logs realtime`) show `[<instance>] connected / disconnected / forwarded ... to Redis / delivered ... to N local connection(s)`.
 
-*Test page* (`frontend/test/realtime.html`, **throwaway**; kept through M11 as a staff view, M12 deletes it): http://localhost:8080/test/realtime.html. Log in (prefilled customer1), Connect, "Connect with a bad token" (closes 4401), Send ping, status line with `auth_ok` and the instance id, event log (newest first) with type, `event_id` and `data`; on `ticket.message_created` it fetches the ticket over REST with the tab's token and lists its messages; a repeated `event_id` is shown as **DUPLICATE** in red. Token per tab in `sessionStorage`.
+*Test page* (M6): `frontend/test/realtime.html` and Nginx's `/test/` location were **deleted in M12** (the URL now returns 404). The customer app and the agent dashboard are the WebSocket clients.
 
 **Celery tasks:** `app.tasks.ingest_document` (knowledge, queue `knowledge`, above), `app.tasks.run_agent_for_message` and `app.tasks.resume_after_approval` (M9) (agent, queue `agent`, below), `app.tasks.execute_approved_refund(approval_id)` (M9, order, queue `order`: `bind=True`, `acks_late=True`, `ignore_result=True`, `max_retries=5`, above). Events never use Celery.
 
@@ -552,6 +565,25 @@ How it is collected (inline in `graph.run_agent`, no helper functions): this run
 *M11 verification* (2026-11-16, headless Chrome driven over the DevTools protocol from a throwaway scratch script, plus `curl -I`): all ten done-checks passed, at 1200 px and 375 px (no horizontal scroll on any view), no JavaScript errors: sign-in/wrong password/register/staff message; orders incl. DL-1003 and "Not shipped yet"; headphones refund live → "Refunded ₹4,500"; smartwatch → "Waiting for review", fixed awaiting message, approval in REST → outcome live, status Open, "Refunded ₹18,000"; takeover banner/system message live, no typing, no AI reply, agent reply live, release → AI answers; two tabs identical, no duplicates; `docker compose restart realtime` → "Reconnecting…" then a message posted during the restart appears; XSS text shown as text, no alert; foreign ticket "not found"; cleared token → session-ended message. AI replies had no Markdown.
 *Prompt (M11):* `SYSTEM_PROMPT` style rule "Write in plain text. Do not use Markdown formatting such as asterisks, headings or tables. Short paragraphs and simple numbered lines are fine." (the app shows replies as plain text).
 
+**Agent dashboard (M12)** (`frontend/agent/`, `http://localhost:8080/agent/`).
+*Routes* (hash router in `main.js`; signed out, every route shows sign-in; unknown routes and `#/login` while signed in go to `#/tickets`). `#/tickets` and `#/tickets/<id>` share one layout: the queue on the left and the detail on the right (≥ 961 px); narrower they stack, with an open ticket **above** the queue. Moving between tickets keeps the queue (and its filters) and replaces only the detail.
+| Route / view | REST calls (through Nginx) | Refetches on (after grouping) |
+|---|---|---|
+| `#/login` `renderAuth` | `POST /api/identity/login`, then `GET /api/identity/me` | – |
+| header (pending count) | `GET /api/tickets/approvals?status=pending` (length) | sign-in, any `approval.*`, reconnect |
+| queue `renderQueue` | `GET /api/tickets/tickets[?status=]` (API order: newest `updated_at` first); "Assigned to me" (`assigned_agent_id` = me) and "Taken over" (`taken_over_by` set) filter in the browser | any `ticket.*`, filter change, reconnect |
+| `#/tickets/<id>` `renderTicket` | `GET /api/tickets/tickets/{id}`; `GET /api/tickets/approvals?status=pending` (filtered by `ticket_id`, for the "waiting for approval" link); `GET /api/agent/tickets/{id}/activity`; actions `POST .../assign`, `POST .../takeover`, `POST .../release`, `PATCH .../status` `{status}`, reply `POST .../messages` `{content}` | ticket: `ticket.*`/`approval.*` with this `ticket_id`; pending link: `approval.*` with this `ticket_id`; activity: `ticket.message_created` with this `ticket_id` **now and again 3 s later**, the Refresh button; everything on reconnect; the ticket after every action/reply |
+| `#/approvals` `renderApprovals` | `GET /api/tickets/approvals[?status=]` (Pending default, Approved, Rejected, All); per pending/approved card `GET /api/orders/returns/{return_request_id}`; `POST /api/tickets/approvals/{id}/approve` `{note?}` / `.../reject` `{note}` | any `approval.*` or `refund.completed`, filter change, reconnect, after a decision |
+*Session:* like M11 (token in `sessionStorage`, key `agent_token`, so each tab has its own session; any 401 except `/login`, or a WebSocket close 4401 → sign-in with "Your session has ended. Please sign in again."). Roles other than `agent`/`admin` are signed out with "This dashboard is for support staff. Customers should use the customer app." Header: email, role, Tickets, Approvals with the pending count, "Reconnecting…", Sign out.
+*Live updates and grouping:* `realtime.js` is the customer app's (auth, 25 s ping, 1/2/4/8/10 s reconnect, `event_id` dedupe, refetch after reconnect). Staff receive every `ticket.*`, `approval.*` and `refund.*` event. `main.js` collects events and, **500 ms after the last one**, hands the whole group to every open view at once (queue, open ticket, approvals) and refreshes the pending count if the group has an `approval.*` event; each view checks the group and refetches at most once. A reconnect passes `null` (refetch everything). The activity log gets a **second refresh 3 s** after a `ticket.message_created` because the agent saves the run's activity just after posting the reply. Each loader drops responses older than its latest request.
+*Queue:* subject, customer email, status, assignment ("You"/"Assigned"/"Unassigned"), "Taken over" / "Taken over by you", updated time. `escalated` (red) and `awaiting_approval` (amber) items have a coloured left border and background. The open ticket is outlined (`aria-current`).
+*Ticket detail:* subject, status, customer email, assignment, takeover state ("by you" / "by another staff member" + time), created/updated. Actions: **Assign to me** (hidden when already mine), **Take over** (not taken over, or admin while someone else has it), **Release to AI** (taken over by me, or admin), **Change status** (select Open/Escalated/Resolved + button, disabled for the current status). An agent who sees someone else's takeover gets a note instead of buttons. Every action shows the API's error text (e.g. the 409 "This ticket has already been taken over by another support agent") and then reloads the ticket. Conversation tab: oldest first, customer on the left, "AI assistant", "Support agent" ("(you)" for own replies) and "System" on the right/centre, `aria-live="polite"`, append-only by message id; the note "The AI is active on this ticket. Take over to stop it from replying." while not taken over; reply box (Enter sends, Shift+Enter new line, text kept on failure). A pending approval for the ticket shows a link "A refund of ₹X for … is waiting for approval. Review it in Approvals →" at the top.
+*AI activity tab:* one card per run, oldest first: time, type ("Customer message"/"Approval decision"), status; the note in `code` plus a friendly explanation (`already_answered`, `human_replied`, `ticket_escalated`, `human_takeover`, `awaiting_approval`, `reply_discarded_takeover` (also when appended to a failure note), `message_not_found`, `no_pending_interrupt`, `lock_busy`, `step_limit`, other failures → "The run failed; the customer got the fallback message"; the `paused for approval <id>` note is replaced by a highlighted "Paused waiting for approval" line); "Escalated to a human: <reason>" highlighted in red; tool calls with step, name, tier badge (Read-only / Workflow / Approval request), arguments as `JSON.stringify(args, null, 2)` in a `<pre>`, the result in a `<details>` `<pre>` (errors marked "Error"); knowledge chunks `Title › Section` + `score 0.00`; the reply text ("Not posted: a human took over" when discarded); model, tokens in/out, duration. The list is redrawn only when the JSON changed, and open result blocks stay open across redraws. Empty state "The AI has not run on this ticket yet."
+*Approvals:* card per approval: summary, amount, status, requested time, ticket link, auto-approved; for pending and approved ones the return request: **order number (taken from the summary, see limitations)**, the return reason, the return's refund amount; approved ones also "Refund completed" (return `refunded`) or "Not executed yet"; decided ones "Decided by" (You / Another staff member / Refund policy (automatic)), when, and the note. **Amount check:** approval amount and return refund amount are compared in paise; if they differ the card shows a warning that the Order service will not pay it (M9 verification). Decision form on pending cards: one note field (optional to approve, required to reject; **Reject stays disabled until the note has text**), `window.confirm` with the amount before sending; a **409** shows "This approval was already decided by another staff member." at the top and reloads the list. A return request that no longer exists (e.g. after `seed --reset`) shows "Could not load it: The return request was not found." The list is redrawn only when the data changed, and typed notes are kept per approval id across redraws.
+*Safety:* no `innerHTML` anywhere (`textContent` on `createElement` elements); tool arguments and results only as `<pre>` text. Verified: a subject `<b>bold?</b>` and a message `<img src=x onerror=alert(1)>` show as text, no element or alert.
+*Nginx:* `/agent/` like `/customer/` (`index.html`, `Cache-Control: no-store`, JS as `application/javascript`).
+*M12 verification* (2026-11-16, headless Chrome over the DevTools protocol from throwaway scratch scripts, several tabs as customer and staff, after `seed --reset`): all ten done-checks passed with no JavaScript errors (only network log lines: 404s for old approvals' deleted return requests, the agent2 409, the WebSocket 502 during the Realtime restart). Details: customer1 refused with the staff message; queue status/assigned/taken-over filters; smartwatch: new ticket live in the queue, count 6 → 7, card "Smartwatch from ORD-1004 · ₹18,000 · ORD-1004 · Won't turn on · ₹18,000", no warning, activity with `create_return_request` (Workflow), `request_refund` (Approval request), "Paused waiting for approval", chunks with scores; approve → customer got "Good news! … ₹18,000.00 …" live, count 7 → 6, "Decided by You", "Refund completed", an approval-decision run (0 tokens); tablet: Reject disabled until a note, rejection note live for the customer, return still `requested`; two tabs deciding the same approval → "already decided by another staff member"; takeover banner live for the customer, dashboard reply live as "Support agent", next customer message → `human_takeover` skip, agent2 sees a note instead of Take over and gets the readable 409 when clicking, admin takes it over and releases, AI answers again; escalation "Customer requested to speak with a human support agent." highlighted and the ticket highlighted in the queue; 92 tool calls on 40 tickets, none with `customer_id`/`ticket_id`; `docker compose restart realtime` → "Reconnecting…", then a message posted meanwhile appeared; no horizontal scroll at 1400, 820 and 375 px; a bad token → session-ended message; `/test/realtime.html` 404.
+
 **Environment variables per service** (set in `docker-compose.yml`, values from `.env`):
 `SERVICE_NAME`, `PORT`, `ROOT_PATH` (the Nginx prefix), `DATABASE_URL` (not for realtime), `REDIS_URL`, `RABBITMQ_URL`. Identity also gets `JWT_PRIVATE_KEY_PATH`, `JWT_PUBLIC_KEY_PATH`, `ACCESS_TOKEN_EXPIRE_MINUTES`. Order also gets `JWT_PUBLIC_KEY_PATH` (and mounts only `keys/public`). Ticket gets `JWT_PUBLIC_KEY_PATH` and `REFUND_AUTO_APPROVE_LIMIT` (mounts only `keys/public`). Knowledge gets `JWT_PUBLIC_KEY_PATH`, `OPENAI_API_KEY`, `EMBEDDING_MODEL` (mounts only `keys/public`). Realtime (M6) gets `JWT_PUBLIC_KEY_PATH` (mounts only `keys/public`), no `DATABASE_URL`; it has no `container_name` and no host port so it can be scaled. `knowledge-worker` gets the same variables as knowledge minus `PORT`/`ROOT_PATH` (`SERVICE_NAME=knowledge-worker`) and mounts no keys (it never checks tokens; the path is only required by `config.py`).
 M5: order, knowledge and ticket also get `GRPC_PORT` (50051 / 50052 / 50053), `SERVICE_TOKEN_SECRET` (`${SERVICE_TOKEN_SECRET:?...}`: Compose refuses to start if it is unset or empty) and `GRPC_ALLOWED_CALLERS` (`agent`). The worker gets `GRPC_PORT: 50052`, `SERVICE_TOKEN_SECRET: not-used-by-the-worker` and `GRPC_ALLOWED_CALLERS: none` only because it shares `config.py`; it never starts a gRPC server and never sees the real secret.
@@ -573,7 +605,7 @@ M7: `agent` and `agent-worker` get `DATABASE_URL`, `REDIS_URL`, `RABBITMQ_URL`, 
 - [x] M9 Approval and refund flow (request_refund tool, interrupt/resume on human decisions, Order verifies approvals over gRPC before refunding)
 - [x] M10 Human takeover and AI activity log (takeover/release silences the AI, enforced by the Ticket service; activity log of every run on `agent_runs`, staff endpoints)
 - [x] M11 Customer app (plain JS ES modules at `/customer/`: sign in/register, orders with return status, tickets, live AI chat over WebSocket with reconnect + refetch)
-- [ ] M12 Agent dashboard
+- [x] M12 Agent dashboard (plain JS ES modules at `/agent/`: queue with filters, ticket detail with actions, conversation and AI activity, approvals with return context; live updates grouped per 500 ms; M6 test page removed)
 - [ ] M13 Hardening and demo
 
 **Demo orders** (`docker compose exec order python seed.py`, safe to run again; dates are relative to the day the seed runs; every item has quantity 1; amounts in INR; later milestones depend on these numbers). **`--reset`** (M8) deletes the refunds, return requests, shipments, items and orders of these eleven order numbers only, in one transaction, then recreates them with dates relative to today (item ids change; the tools always read them from `get_order`). Use it before the agent check scripts and whenever return windows have aged (ORD-1001/ORD-1004 electronics windows are 15 days):
@@ -604,7 +636,7 @@ Delivered orders have a `BlueDart` shipment (`BD-<number>`, shipped 3 days befor
 - All five API services (and realtime, minus Postgres) wait for Postgres, Redis and RabbitMQ healthy, so later milestones need no `depends_on` changes.
 - Service containers have no Docker healthcheck (`python:3.12-slim` has no curl); Nginx just starts after them.
 - No code bind mounts: code changes need `docker compose up --build`.
-- Placeholder pages (M0): the agent page checks `/api/tickets/health`. The customer placeholder (`app.js`) was replaced by the M11 app.
+- Placeholder pages (M0): replaced by the M11 customer app and the M12 agent dashboard (both `app.js` placeholders are gone).
 - Identity migrations run from the `command:` in `docker-compose.yml` (`alembic upgrade head && exec uvicorn ...`, with `$$PORT` so Compose does not substitute it); the Dockerfile stays identical.
 - `alembic/env.py` is online-mode only (no offline SQL generation), to keep it short.
 - Swagger through Nginx needed no extra work: the M0 `root_path` setup is enough (`/api/identity/docs` loads and "Authorize" accepts a pasted token via `HTTPBearer`).
@@ -665,7 +697,7 @@ Delivered orders have a `BlueDart` shipment (`BD-<number>`, shipped 3 days befor
 - Realtime forwards the raw RabbitMQ body to Redis unchanged; it only parses it to reject non-JSON messages (acked and dropped, so a poison message cannot loop forever).
 - Realtime auth failures (timeout, bad JSON, wrong first message, bad token) all close with 4401; the server accepts the socket first, because a close code can only be sent on an accepted WebSocket.
 - Instance id = container hostname (Docker sets it to the short container id), also returned by `/ws/health` so Nginx's round robin is visible.
-- The test page is one self-contained HTML file with inline CSS and JS (allowed for a throwaway page); Nginx has a `/test/` location for it.
+- The M6 test page was one self-contained HTML file with inline CSS and JS (allowed for a throwaway page); it and Nginx's `/test/` location were removed in M12.
 - `grpc_client_check.py` reads `SERVICE_TOKEN_SECRET` by scanning the repo's `.env` (stdlib only) and mints a fresh token per call with PyJWT; it exits with status 1 if any step fails.
 - M7: the agent task uses explicit `self.retry` instead of `autoretry_for`, because the final failure must post a fallback message (decided in the milestone prompt).
 - M7: each Celery service has its own queue (`agent`, `knowledge`) on the shared RabbitMQ broker; with the default `celery` queue each worker would receive the other's unknown tasks. The Knowledge change is only `task_default_queue` + `-Q knowledge`.
@@ -739,6 +771,18 @@ Delivered orders have a `BlueDart` shipment (`BD-<number>`, shipped 3 days befor
 - M11: registering calls `POST /register` and then `POST /login` with the same credentials (register returns the user, not a token).
 - M11: small view-local arrow functions (`loadConversation`, `loadTickets`, `showMode`, …) exist only where the same steps run more than once (first load, events, reconnect, after sending); `goTo` and `signOut` in `main.js` are used from several places.
 - M11: Nginx `absolute_redirect off` (not asked for) so `http://localhost:8080/customer` redirects correctly.
+- M12: `api.js`, `realtime.js` and `format.js` are copied from the customer app (the two apps stay independent, like the services); `api.js` differs only in its `sessionStorage` key (`agent_token`), so a customer and a staff session in the same browser never overwrite each other's token; `format.js` has staff labels ("Waiting for approval", "Escalated") plus approval-status and tier labels, and drops the order labels.
+- M12: event grouping lives in `main.js` (one 500 ms timer after the last event); views get the whole group and decide what to refetch, so a burst (takeover = 3 events, a decision = 2–4) costs one request per view.
+- M12: the tickets layout is kept while moving between `#/tickets` and `#/tickets/<id>` (only the detail is replaced); the queue and approvals filters are kept in module variables (memory only, no browser storage).
+- M12: on narrow screens the open ticket is shown above the queue (CSS `order`), so opening a ticket does not leave it below a long list.
+- M12: "Take over" is hidden for an agent while someone else has the ticket (as the milestone asked); that agent sees a note instead. The API's 409 is still shown when the click races the live update.
+- M12: the AI activity list and the approvals list are only redrawn when the fetched JSON changed; open `<details>` blocks and typed approval notes are kept across redraws, so live events do not disturb reading or typing.
+- M12: the pending approval link on a ticket uses `GET /approvals?status=pending` filtered by `ticket_id` in the browser (there is no per-ticket approvals endpoint) and links to `#/approvals` (there is no per-approval route).
+- M12: one note field per pending approval, used by both buttons (optional to approve, required to reject). Approve sends `{}` without a note.
+- M12: return requests are loaded for pending **and** approved cards (approved ones show "Refund completed" / "Not executed yet"); rejected cards skip it.
+- M12: "Decided by" shows "Refund policy (automatic)" for auto-approvals (they have no `decided_by`).
+- M12: the order number on an approval card is read from the approval summary (`/ORD-\d+/`; the summary is written by code as "<product> from <order number>" in M9) because the return request has only `order_id` (see limitations; no backend change was made).
+- M12: the ticket's "Release" button is labelled "Release to AI" (clearer for staff); its takeover fact says "Not taken over" (not "the AI answers": the AI is silent on escalated tickets).
 - M8: prompt changes made while checking: "Not eligible" explains the window length ("the 30-day return window has passed"); after creating a return the model must search the refund policy and say the team reviews and processes the refund (it had said "processed automatically"); for "where is my …" it must call `get_order` and give tracking without asking permission (it had stopped at "shipped, want tracking?").
 
 ## 10. How to run
@@ -772,7 +816,7 @@ python scripts/grpc_client_check.py              # needs the stack up and the id
 ```bash
 # M6 events and realtime
 docker compose up --build --scale realtime=2     # two Realtime instances; scale on `up` (else `docker compose restart nginx`)
-# then open http://localhost:8080/test/realtime.html in several tabs (one user per tab)
+# then open the customer app and the agent dashboard in several tabs (one user per tab)
 # RabbitMQ UI http://localhost:15672: exchange support.events, queue realtime.events with 2 consumers
 ```
 ```bash
@@ -809,7 +853,13 @@ python scripts/check_takeover_activity.py            # on the host, stdlib only:
 docker compose restart nginx                         # once, after the nginx.conf change (frontend files need no restart)
 docker compose up -d --build agent-worker agent      # once, for the plain-text prompt rule (then restart nginx if you see 502s)
 docker compose exec order python seed.py --reset     # fresh demo orders before the end-to-end checks
-# open http://localhost:8080/customer/ ; staff decisions/takeover still in Swagger (/api/tickets/docs) until M12
+# open http://localhost:8080/customer/
+```
+```bash
+# M12 agent dashboard
+docker compose restart nginx                         # once, after the nginx.conf change (frontend files need no restart)
+docker compose exec order python seed.py --reset     # fresh demo orders before the refund checks
+# open http://localhost:8080/agent/ (agent1/agent2/admin@example.com, Password123!) and http://localhost:8080/customer/ in other tabs
 ```
 `.env` needs `SERVICE_TOKEN_SECRET` (M5), a real `OPENAI_API_KEY` for ingestion, search and the agent, `CHAT_MODEL`, `AGENT_RECURSION_LIMIT` and `AGENT_HISTORY_LIMIT` (M7; copy the new lines from `.env.example`; M8 raised `AGENT_RECURSION_LIMIT` to 16, update an existing `.env`). Each service's tables are created by its container's `alembic upgrade head` on startup (PGVector's tables by the knowledge API at startup).
 
@@ -828,7 +878,6 @@ docker compose exec order python seed.py --reset     # fresh demo orders before 
 - One slow client can delay delivery to others on the same instance by up to 5 s per event (sends are sequential, with a 5 s timeout).
 - Events are published after the commit but outside the transaction: a crash between commit and publish loses the event.
 - Realtime also logs FastAPI's `root_path` deprecation warning (same as the other services).
-- `frontend/test/realtime.html` is a throwaway verification page; M12 deletes it and Nginx's `/test/` location.
 - M11: the typing indicator is **simulated on the client** (no typing event): it compares the server's `created_at` with the browser clock, so a badly wrong browser clock shows it too long or not at all; it can also show for up to 60 s when the AI decides not to answer (e.g. a skip rule).
 - M11: there is **no pagination**: the tickets and orders lists and a conversation load everything every time.
 - M11: the token is **not refreshed**: when it expires (60 min) the next request or reconnect sends the customer back to sign-in. An expired token on an open WebSocket is not noticed until it reconnects (see the M6 limitation).
@@ -894,6 +943,16 @@ docker compose exec order python seed.py --reset     # fresh demo orders before 
 - M10: a run that was discarded because of a takeover still ran its tools: a return request or refund approval it created stays (the Order/Ticket services did that work), only the reply is missing; the human sees it in the activity log.
 - M10: there is no takeover timeout or automatic release; a forgotten takeover silences the AI on that ticket until someone releases it.
 - M10: `GET /tickets/{id}/activity` has no limit and no paging (a ticket has a handful of runs in practice).
+- M12: **staff names are not shown** (only "You" or "Another staff member"), because the Identity service only lets admins list users (`GET /users`).
+- M12: the AI activity refresh after a reply relies on a **short delay** (a second fetch 3 s after `ticket.message_created`); there is no "run finished" event. A run that saves later than that shows up on the next event, a reconnect or the Refresh button.
+- M12: the **order number** on an approval card is parsed from the approval summary, because `GET /returns/{id}` returns `order_id` but no order number (Order service). An approval whose summary was written by hand (admin REST) shows no order number.
+- M12: the approvals page loads one return request per pending/approved card (no batch endpoint); the "Approved"/"All" filters with many old approvals make many small requests, and approvals whose return requests were deleted by `seed --reset` log 404s in the browser console (the card says so).
+- M12: no pagination: the queue loads every ticket on every `ticket.*` event (fine for the demo; the check scripts leave a few hundred tickets).
+- M12: the queue's "Taken over" and "Assigned to me" filters run in the browser on the loaded list (the API has only `status`).
+- M12: approve/reject confirmations use the browser's `window.confirm`.
+- M12: an agent who wants to see the takeover 409 must click before the live update hides the button (or with Realtime stopped); normally the button is simply not offered.
+- M12: the AI activity explains known notes; other failure notes are shown raw (`<ErrorType>: <message>`).
+- Agent (found in M12, not changed): the model sometimes calls `create_return_request` and `request_refund` **in parallel in the same step**; the ToolNode runs them concurrently, so `request_refund` sees no return yet and answers "No return has been started for this item yet". The AI then tells the customer it is waiting, and the refund is only requested after the customer's next message. Possible fix (backend, not done): `bind_tools(..., parallel_tool_calls=False)` or a prompt rule.
 
 ## 12. Open items for later milestones
 
@@ -901,5 +960,6 @@ docker compose exec order python seed.py --reset     # fresh demo orders before 
 - `assigned_agent_id` is not validated against the Identity service (it is always the caller's own id from the token today).
 - `customer_email` on a ticket is a copy from the token; it is not updated if the user's email changes.
 - ~~M10: takeover flag; escalation reason, tool calls with tiers, paused/approval runs in an activity log~~ **Closed in M10** (see "AI activity log" and the takeover rules).
-- M12: the dashboard shows `GET /api/agent/tickets/{id}/activity` per ticket and the takeover/release buttons; it should listen for `ticket.takeover_changed`.
-- M12: the dashboard replaces REST for approve/reject; it could also surface Order's verification failures (today only logged).
+- ~~M12: the dashboard shows the activity log and takeover/release, listening for `ticket.takeover_changed`~~ **Closed in M12.**
+- Order's refund verification failures are still only logged (the dashboard shows "Not executed yet" on an approved card whose return is not `refunded`).
+- Backend gaps found in M12 (not changed): the return request response has no order number; the agent's parallel `create_return_request` + `request_refund` race (see limitations).
